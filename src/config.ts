@@ -70,6 +70,8 @@ export interface RawArgs {
   markdown?: boolean;
   /** Override for the inbound-attachment downloads dir (`--files-dir`). Default `<stateRoot>/<space>/files/`. */
   filesDir?: string;
+  /** Free-text line appended to the bottom of /help (`--help-footer`, else $COTAL_TG_HELP_FOOTER). */
+  helpFooter?: string;
 }
 
 export function parseArgs(argv: string[]): RawArgs {
@@ -92,6 +94,7 @@ export function parseArgs(argv: string[]): RawArgs {
     else if (a === "--groq-key") out.groqKey = val(a, ++i);
     else if (a === "--chat") out.chat = val(a, ++i);
     else if (a === "--files-dir") out.filesDir = val(a, ++i);
+    else if (a === "--help-footer") out.helpFooter = val(a, ++i);
     else if (a === "--learn-first-chat") out.learnFirstChat = true;
     else if (a === "--no-markdown" || a === "--plain") out.markdown = false;
     else throw new Error(`cotal-telegram: unknown flag "${a}"`);
@@ -116,6 +119,7 @@ export function buildConfig(raw: RawArgs): Config {
     learnFirstChat: raw.learnFirstChat ?? false,
     markdown: raw.markdown ?? true,
     filesDir: raw.filesDir,
+    helpFooter: raw.helpFooter ?? process.env.COTAL_TG_HELP_FOOTER,
   };
 }
 
