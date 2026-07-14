@@ -9,7 +9,7 @@
  */
 import { readFileSync } from "node:fs";
 import { basename } from "node:path";
-import { SendError, type CommandDesc, type CommandScope, type Inbound, type Transport } from "@cotal-ai/endpoint-core";
+import { SendError, type ButtonChoice, type CallbackQuery, type CommandDesc, type CommandScope, type Inbound, type Transport } from "@cotal-ai/endpoint-core";
 import { readOffset, writeOffset } from "@cotal-ai/endpoint-core";
 import type { Config } from "./config.js";
 import { telegramFormatter } from "./format.js";
@@ -64,9 +64,30 @@ export interface TgMessage {
   photo?: TgPhotoSize[];
 }
 
+/** A tap on an inline-keyboard button. `message` is the button message (present for a fresh tap, absent
+ *  for a tap on a very old message Telegram no longer tracks); `data` is the button's `callback_data`. */
+export interface TgCallbackQuery {
+  id: string;
+  from: TgUser;
+  message?: TgMessage;
+  data?: string;
+}
+
 export interface TgUpdate {
   update_id: number;
   message?: TgMessage;
+  callback_query?: TgCallbackQuery;
+}
+
+/** One inline-keyboard button: the visible `text` + the opaque `callback_data` echoed back on tap. */
+export interface TgInlineButton {
+  text: string;
+  callback_data: string;
+}
+
+/** An inline keyboard: rows of buttons, attached to a message via `reply_markup`. */
+export interface TgInlineKeyboard {
+  inline_keyboard: TgInlineButton[][];
 }
 
 /** A Telegram BotCommandScope (the subset we set). `all_private_chats` OVERRIDES the default scope in
@@ -82,7 +103,13 @@ export interface TelegramApi {
   /** Long-poll. `signal` lets the caller abort the in-flight request (so stop() doesn't block on
    *  the ~40s HTTP timeout of a parked long-poll). */
   getUpdates(offset: number, timeoutSec: number, signal?: AbortSignal): Promise<TgUpdate[]>;
-  sendMessage(chatId: number, text: string, opts?: { reply_to_message_id?: number; parse_mode?: "HTML" | "MarkdownV2" | "Markdown" }): Promise<{ message_id: number }>;
+  sendMessage(chatId: number, text: string, opts?: { reply_to_message_id?: number; parse_mode?: "HTML" | "MarkdownV2" | "Markdown"; reply_markup?: TgInlineKeyboard }): Promise<{ message_id: number }>;
+  /** Edit an already-sent message's text in place (Bot API `editMessageText`). Omitting `reply_markup`
+   *  drops the message's inline keyboard (the tap already happened). */
+  editMessageText(chatId: number, messageId: number, text: string, opts?: { parse_mode?: "HTML" | "MarkdownV2" | "Markdown"; reply_markup?: TgInlineKeyboard }): Promise<{ message_id: number }>;
+  /** Answer a callback_query (Bot API `answerCallbackQuery`) — stops the client's loading spinner, with an
+   *  optional toast `text`. */
+  answerCallbackQuery(callbackId: string, opts?: { text?: string; show_alert?: boolean }): Promise<void>;
   /** React to a message with a single standard emoji (the "send signal"). `emoji` MUST be from
    *  Telegram's fixed `ReactionTypeEmoji` set (👀 is; 📢 and keycap digits are NOT). `undefined` CLEARS. */
   setMessageReaction(chatId: number, messageId: number, emoji: string | undefined): Promise<void>;
@@ -156,6 +183,31 @@ export function fileAttachment(
     return { fileId: p.file_id, filename: `photo_${p.file_unique_id}.jpg`, mimeType: "image/jpeg", size: p.file_size };
   }
   return undefined;
+}
+
+/** Map a Telegram callback_query → a channel-agnostic {@link CallbackQuery}. Returns undefined when the
+ *  tap carries NO `message` (Telegram drops the message on taps against very old inline keyboards) — there
+ *  is nothing to edit in place, so the bridge can't act on it. `data` defaults to "" (the router rejects
+ *  it as unknown). Pure, no I/O. */
+export function toCallback(cbq: TgCallbackQuery): CallbackQuery | undefined {
+  if (!cbq.message) return undefined;
+  return {
+    chatId: cbq.message.chat.id,
+    messageId: cbq.message.message_id,
+    callbackId: cbq.id,
+    data: cbq.data ?? "",
+    userId: cbq.from?.id,
+  };
+}
+
+/** Lay out {@link ButtonChoice}s into a Telegram inline keyboard, 1–2 buttons per row. Each button carries
+ *  the choice's opaque `data` as `callback_data` (Telegram echoes it back on tap). Pure. */
+export function inlineKeyboard(choices: ButtonChoice[]): TgInlineKeyboard {
+  const rows: TgInlineButton[][] = [];
+  for (let i = 0; i < choices.length; i += 2) {
+    rows.push(choices.slice(i, i + 2).map((c) => ({ text: c.label, callback_data: c.data })));
+  }
+  return { inline_keyboard: rows };
 }
 
 /** The container extensions Groq/Whisper accepts. Telegram's own extension is the only hint we pass. */
@@ -265,7 +317,21 @@ export function telegramTransport(api: TelegramApi, cfg: Config, log: (m: string
       return { messageId: sent.message_id };
     },
 
-    async run(onInbound, signal) {
+    async sendButtons(chatId, prompt, choices) {
+      const sent = await api.sendMessage(chatId, prompt, { reply_markup: inlineKeyboard(choices) });
+      return { messageId: sent.message_id };
+    },
+
+    async editText(chatId, messageId, text, opts) {
+      // No reply_markup on the edit → the inline keyboard is dropped (the tap is spent).
+      await api.editMessageText(chatId, messageId, text, { parse_mode: opts?.mode as "HTML" | undefined });
+    },
+
+    async answerCallback(callbackId, opts) {
+      await api.answerCallbackQuery(callbackId, { text: opts?.text });
+    },
+
+    async run(onInbound, signal, onCallback) {
       let offset = readOffset(cfg);
       while (!signal.aborted) {
         let ups: TgUpdate[];
@@ -286,6 +352,24 @@ export function telegramTransport(api: TelegramApi, cfg: Config, log: (m: string
               // POISON-UPDATE GUARD: one un-routable inbound must NOT wedge the whole queue by re-failing
               // the head forever. Log loudly, then STILL advance past it.
               log(`handleInbound failed for update ${u.update_id} (skipping): ${(e as Error).message}`);
+            }
+          }
+          // A button tap. getUpdates with no allowed_updates ALREADY delivers callback_query, so no poll
+          // change is needed — but if anyone ever sets allowed_updates it MUST include "callback_query".
+          // Same POISON-GUARD + offset-advance as an inbound: a throwing onCallback is logged, never wedges.
+          if (u.callback_query && onCallback) {
+            const cb = toCallback(u.callback_query);
+            if (cb) {
+              try {
+                await onCallback(cb);
+              } catch (e) {
+                log(`handleCallback failed for update ${u.update_id} (skipping): ${(e as Error).message}`);
+              }
+            } else {
+              // A message-less tap (an inline keyboard older than ~48h Telegram no longer tracks): there's
+              // nothing to edit and the bridge never sees it, but Telegram still shows a loading spinner
+              // until WE answer it — so stop the spinner here, best-effort.
+              await api.answerCallbackQuery(u.callback_query.id).catch(() => {});
             }
           }
           // Advance + persist the offset regardless — a handled OR skipped update is behind us now.
@@ -352,6 +436,24 @@ export function httpApi(token: string): TelegramApi {
         reply_to_message_id: opts?.reply_to_message_id,
         // parse_mode is omitted entirely when undefined (plain text) — a null/"" would be a bad request.
         parse_mode: opts?.parse_mode,
+        // reply_markup carries an inline keyboard when present; omitted (undefined) for a plain message.
+        reply_markup: opts?.reply_markup,
+      });
+    },
+    async editMessageText(chatId, messageId, text, opts) {
+      return call<{ message_id: number }>("editMessageText", {
+        chat_id: chatId,
+        message_id: messageId,
+        text,
+        parse_mode: opts?.parse_mode,
+        reply_markup: opts?.reply_markup,
+      });
+    },
+    async answerCallbackQuery(callbackId, opts) {
+      await call<boolean>("answerCallbackQuery", {
+        callback_query_id: callbackId,
+        text: opts?.text,
+        show_alert: opts?.show_alert,
       });
     },
     async setMessageReaction(chatId, messageId, emoji) {

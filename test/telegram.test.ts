@@ -15,7 +15,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { EventEmitter } from "node:events";
 
-import { readOffset, type Inbound } from "@cotal-ai/endpoint-core";
+import { readOffset, type CallbackQuery, type Inbound } from "@cotal-ai/endpoint-core";
 import type { Config } from "../src/config.js";
 import { parseArgs } from "../src/config.js";
 import { SendError } from "@cotal-ai/endpoint-core";
@@ -23,12 +23,16 @@ import {
   fileAttachment,
   groqFilename,
   httpApi,
+  inlineKeyboard,
   largestPhoto,
   TelegramApiError,
   telegramTransport,
+  toCallback,
   voiceFileId,
   type BotCommandScope,
   type TelegramApi,
+  type TgCallbackQuery,
+  type TgInlineKeyboard,
   type TgMessage,
   type TgPhotoSize,
   type TgUpdate,
@@ -56,7 +60,9 @@ test("groqFilename: Telegram .oga → .ogg; accepted extensions kept; missing �
 // ── a fake low-level Telegram Bot API ──────────────────────────────────────────────────────────────
 class FakeApi implements TelegramApi {
   updates: TgUpdate[][] = [];
-  sends: { chatId: number; text: string; parse_mode?: string; reply_to?: number }[] = [];
+  sends: { chatId: number; text: string; parse_mode?: string; reply_to?: number; reply_markup?: TgInlineKeyboard }[] = [];
+  edits: { chatId: number; messageId: number; text: string; parse_mode?: string; reply_markup?: TgInlineKeyboard }[] = [];
+  answers: { callbackId: string; text?: string }[] = [];
   reactions: { chatId: number; messageId: number; emoji: string | undefined }[] = [];
   commandsSet: { commands: { command: string; description: string }[]; scope?: BotCommandScope }[] = [];
   downloads: string[] = [];
@@ -71,10 +77,17 @@ class FakeApi implements TelegramApi {
     await new Promise((r) => setTimeout(r, 10));
     return [];
   }
-  async sendMessage(chatId: number, text: string, opts?: { reply_to_message_id?: number; parse_mode?: string }) {
+  async sendMessage(chatId: number, text: string, opts?: { reply_to_message_id?: number; parse_mode?: string; reply_markup?: TgInlineKeyboard }) {
     this.sendThrows?.(chatId, text, opts?.parse_mode);
-    this.sends.push({ chatId, text, parse_mode: opts?.parse_mode, reply_to: opts?.reply_to_message_id });
+    this.sends.push({ chatId, text, parse_mode: opts?.parse_mode, reply_to: opts?.reply_to_message_id, reply_markup: opts?.reply_markup });
     return { message_id: this.nextId++ };
+  }
+  async editMessageText(chatId: number, messageId: number, text: string, opts?: { parse_mode?: string; reply_markup?: TgInlineKeyboard }) {
+    this.edits.push({ chatId, messageId, text, parse_mode: opts?.parse_mode, reply_markup: opts?.reply_markup });
+    return { message_id: messageId };
+  }
+  async answerCallbackQuery(callbackId: string, opts?: { text?: string; show_alert?: boolean }) {
+    this.answers.push({ callbackId, text: opts?.text });
   }
   async setMessageReaction(chatId: number, messageId: number, emoji: string | undefined) {
     this.reactions.push({ chatId, messageId, emoji });
@@ -223,6 +236,104 @@ test("run loop: a POISON inbound (throwing handler) is skipped and the offset ST
   abort.abort();
   await loop;
   assert.equal(readOffset(cfg), 6, "offset advanced past the poison update (queue not wedged)");
+});
+
+// ── /switch: callback_query mapping + inline-keyboard render + run delivery ─────────────────────────
+test("toCallback: maps a callback_query → CallbackQuery; undefined when message missing; empty data defaults", () => {
+  const cbq: TgCallbackQuery = { id: "cb1", from: { id: 9 }, data: "sw|dm|bob", message: { message_id: 55, chat: { id: 42, type: "private" } } as TgMessage };
+  assert.deepEqual(toCallback(cbq), { chatId: 42, messageId: 55, callbackId: "cb1", data: "sw|dm|bob", userId: 9 });
+  // a tap on a very old message carries NO `message` (Telegram no longer tracks it) → undefined (nothing to edit)
+  assert.equal(toCallback({ id: "cb2", from: { id: 9 }, data: "sw|all" }), undefined);
+  // a missing `data` defaults to "" (the router then rejects it as unknown, never fabricated)
+  assert.deepEqual(
+    toCallback({ id: "cb3", from: { id: 1 }, message: { message_id: 7, chat: { id: 42, type: "private" } } as TgMessage }),
+    { chatId: 42, messageId: 7, callbackId: "cb3", data: "", userId: 1 },
+  );
+});
+
+test("inlineKeyboard: lays choices out 1–2 buttons per row, label→text + data→callback_data", () => {
+  const kb = inlineKeyboard([
+    { label: "@a", data: "sw|dm|a" },
+    { label: "@b", data: "sw|dm|b" },
+    { label: "📢 all", data: "sw|all" },
+  ]);
+  assert.deepEqual(kb, {
+    inline_keyboard: [
+      [{ text: "@a", callback_data: "sw|dm|a" }, { text: "@b", callback_data: "sw|dm|b" }],
+      [{ text: "📢 all", callback_data: "sw|all" }],
+    ],
+  });
+});
+
+test("telegramTransport.sendButtons sends a prompt with an inline keyboard and returns its message id", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "tg-"));
+  const api = new FakeApi();
+  const tp = telegramTransport(api, cfgIn(dir));
+  const res = await tp.sendButtons!(42, "Switch this chat to:", [{ label: "@bob", data: "sw|dm|bob" }, { label: "📢 all", data: "sw|all" }]);
+  assert.equal(res.messageId, 1000, "returns the sent message id (editable on tap)");
+  assert.equal(api.sends.length, 1);
+  assert.equal(api.sends[0].text, "Switch this chat to:");
+  assert.deepEqual(api.sends[0].reply_markup, {
+    inline_keyboard: [[{ text: "@bob", callback_data: "sw|dm|bob" }, { text: "📢 all", callback_data: "sw|all" }]],
+  });
+});
+
+test("telegramTransport.editText edits in place (dropping the keyboard); answerCallback stops the spinner", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "tg-"));
+  const api = new FakeApi();
+  const tp = telegramTransport(api, cfgIn(dir));
+  await tp.editText!(42, 55, "→ now talking to @bob", { mode: "HTML" });
+  assert.deepEqual(api.edits, [{ chatId: 42, messageId: 55, text: "→ now talking to @bob", parse_mode: "HTML", reply_markup: undefined }], "edit passes parse_mode + drops the keyboard (no reply_markup)");
+  await tp.answerCallback!("cb1", { text: "ok" });
+  assert.deepEqual(api.answers, [{ callbackId: "cb1", text: "ok" }]);
+});
+
+test("run loop: a callback_query update is delivered to onCallback and the offset advances + persists", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "tg-"));
+  const api = new FakeApi();
+  api.updates.push([{ update_id: 8, callback_query: { id: "cb1", from: { id: 9 }, data: "sw|dm|bob", message: { message_id: 55, chat: { id: 42, type: "private" } } as TgMessage } }]);
+  const cfg = cfgIn(dir);
+  const tp = telegramTransport(api, cfg);
+  const seen: CallbackQuery[] = [];
+  const abort = new AbortController();
+  const loop = tp.run(async () => {}, abort.signal, async (cb) => { seen.push(cb); });
+  await tick();
+  abort.abort();
+  await loop;
+  assert.equal(seen.length, 1, "the callback_query was delivered to onCallback");
+  assert.deepEqual(seen[0], { chatId: 42, messageId: 55, callbackId: "cb1", data: "sw|dm|bob", userId: 9 });
+  assert.equal(readOffset(cfg), 9, "offset advanced past the callback update and was persisted");
+});
+
+test("run loop: a message-less callback_query is skipped (onCallback not fired) but the offset STILL advances", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "tg-"));
+  const api = new FakeApi();
+  api.updates.push([{ update_id: 8, callback_query: { id: "cb2", from: { id: 9 }, data: "sw|all" } }]); // no message → toCallback undefined
+  const cfg = cfgIn(dir);
+  const tp = telegramTransport(api, cfg);
+  const seen: CallbackQuery[] = [];
+  const abort = new AbortController();
+  const loop = tp.run(async () => {}, abort.signal, async (cb) => { seen.push(cb); });
+  await tick();
+  abort.abort();
+  await loop;
+  assert.equal(seen.length, 0, "a message-less tap maps to undefined → onCallback not fired");
+  assert.equal(readOffset(cfg), 9, "offset advanced past the callback update (queue not wedged)");
+  assert.deepEqual(api.answers, [{ callbackId: "cb2", text: undefined }], "the spinner is still answered so the client doesn't spin forever");
+});
+
+test("run loop: a POISON callback (throwing onCallback) is skipped and the offset STILL advances", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "tg-"));
+  const api = new FakeApi();
+  api.updates.push([{ update_id: 8, callback_query: { id: "cb3", from: { id: 9 }, data: "sw|dm|bob", message: { message_id: 55, chat: { id: 42, type: "private" } } as TgMessage } }]);
+  const cfg = cfgIn(dir);
+  const tp = telegramTransport(api, cfg, () => {});
+  const abort = new AbortController();
+  const loop = tp.run(async () => {}, abort.signal, async () => { throw new Error("boom"); });
+  await tick();
+  abort.abort();
+  await loop;
+  assert.equal(readOffset(cfg), 9, "offset advanced past the poison callback (queue not wedged)");
 });
 
 // ── setCommands → BotCommandScope ─────────────────────────────────────────────────────────────────
