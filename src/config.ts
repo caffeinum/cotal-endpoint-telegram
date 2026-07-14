@@ -68,6 +68,8 @@ export interface RawArgs {
   learnFirstChat?: boolean;
   /** Set false by `--no-markdown` / `--plain`. Undefined → default (markdown on). */
   markdown?: boolean;
+  /** Override for the inbound-attachment downloads dir (`--files-dir`). Default `<stateRoot>/<space>/files/`. */
+  filesDir?: string;
 }
 
 export function parseArgs(argv: string[]): RawArgs {
@@ -89,6 +91,7 @@ export function parseArgs(argv: string[]): RawArgs {
     else if (a === "--creds") out.creds = val(a, ++i);
     else if (a === "--groq-key") out.groqKey = val(a, ++i);
     else if (a === "--chat") out.chat = val(a, ++i);
+    else if (a === "--files-dir") out.filesDir = val(a, ++i);
     else if (a === "--learn-first-chat") out.learnFirstChat = true;
     else if (a === "--no-markdown" || a === "--plain") out.markdown = false;
     else throw new Error(`cotal-telegram: unknown flag "${a}"`);
@@ -112,6 +115,7 @@ export function buildConfig(raw: RawArgs): Config {
     seedChats,
     learnFirstChat: raw.learnFirstChat ?? false,
     markdown: raw.markdown ?? true,
+    filesDir: raw.filesDir,
   };
 }
 

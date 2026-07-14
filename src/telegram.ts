@@ -7,6 +7,8 @@
  * network. The transport owns the long-poll loop (offset cursor, first-run backlog drop, poison guard)
  * and maps each Telegram update → a channel-agnostic {@link Inbound}.
  */
+import { readFileSync } from "node:fs";
+import { basename } from "node:path";
 import { SendError, type CommandDesc, type CommandScope, type Inbound, type Transport } from "@cotal-ai/endpoint-core";
 import { readOffset, writeOffset } from "@cotal-ai/endpoint-core";
 import type { Config } from "./config.js";
@@ -25,11 +27,30 @@ export interface TgFileRef {
   duration?: number;
 }
 
+/** A Telegram document attachment (any uploaded file — pdf, zip, code, …). */
+export interface TgDocument {
+  file_id: string;
+  file_name?: string;
+  mime_type?: string;
+  file_size?: number;
+}
+
+/** One size of a Telegram photo (a photo arrives as an array of these, smallest → largest). */
+export interface TgPhotoSize {
+  file_id: string;
+  file_unique_id: string;
+  width: number;
+  height: number;
+  file_size?: number;
+}
+
 export interface TgMessage {
   message_id: number;
   from?: TgUser;
   chat: { id: number; type: string };
   text?: string;
+  /** A caption on a document/photo/media message — becomes the inbound `text`. */
+  caption?: string;
   reply_to_message?: TgMessage;
   /** A voice note (the mic-button recording — OGG/Opus). */
   voice?: TgFileRef;
@@ -37,6 +58,10 @@ export interface TgMessage {
   audio?: TgFileRef;
   /** A round video note (its audio track is transcribed). */
   video_note?: TgFileRef;
+  /** An uploaded document/file. */
+  document?: TgDocument;
+  /** A photo — an array of sizes (largest chosen for download). */
+  photo?: TgPhotoSize[];
 }
 
 export interface TgUpdate {
@@ -61,6 +86,9 @@ export interface TelegramApi {
   /** React to a message with a single standard emoji (the "send signal"). `emoji` MUST be from
    *  Telegram's fixed `ReactionTypeEmoji` set (👀 is; 📢 and keycap digits are NOT). `undefined` CLEARS. */
   setMessageReaction(chatId: number, messageId: number, emoji: string | undefined): Promise<void>;
+  /** Upload a LOCAL file (read from `path` on disk) to a chat via Telegram's `sendDocument` (multipart).
+   *  `filename` labels the upload (defaults to the path basename); `caption` is optional. */
+  sendDocument(chatId: number, path: string, opts?: { filename?: string; caption?: string }): Promise<{ message_id: number }>;
   /** Resolve a `file_id` to a `file_path` (Telegram's getFile). The path feeds `downloadFile`. */
   getFile(fileId: string): Promise<{ file_id: string; file_path: string }>;
   /** Download a file's raw bytes from `https://api.telegram.org/file/bot<token>/<file_path>`. */
@@ -98,6 +126,36 @@ export const TELEGRAM_MAX = 4096;
  *  audio, then video_note). Returns undefined for a plain text message — pure, no I/O. */
 export function voiceFileId(msg: TgMessage | undefined): string | undefined {
   return msg?.voice?.file_id ?? msg?.audio?.file_id ?? msg?.video_note?.file_id;
+}
+
+/** Pick the LARGEST photo size from a Telegram photo array — by `file_size` when present, else by pixel
+ *  area (`width*height`). Telegram sends sizes smallest→largest but we don't rely on order. Pure. */
+export function largestPhoto(sizes: TgPhotoSize[]): TgPhotoSize {
+  const score = (p: TgPhotoSize) => p.file_size ?? p.width * p.height;
+  return sizes.reduce((best, p) => (score(p) > score(best) ? p : best));
+}
+
+/** The document/photo attachment on a message, normalized to `{fileId, filename, mimeType?, size?}` — or
+ *  undefined for a message with neither. A document keeps its `file_name` (or a `document_<id>` fallback);
+ *  a photo picks the largest size and synthesizes `photo_<file_unique_id>.jpg`. Pure, no I/O. */
+export function fileAttachment(
+  msg: TgMessage | undefined,
+): { fileId: string; filename: string; mimeType?: string; size?: number } | undefined {
+  if (!msg) return undefined;
+  if (msg.document) {
+    const d = msg.document;
+    return {
+      fileId: d.file_id,
+      filename: d.file_name || `document_${d.file_id}`,
+      mimeType: d.mime_type,
+      size: d.file_size,
+    };
+  }
+  if (msg.photo && msg.photo.length > 0) {
+    const p = largestPhoto(msg.photo);
+    return { fileId: p.file_id, filename: `photo_${p.file_unique_id}.jpg`, mimeType: "image/jpeg", size: p.file_size };
+  }
+  return undefined;
 }
 
 /** The container extensions Groq/Whisper accepts. Telegram's own extension is the only hint we pass. */
@@ -143,13 +201,31 @@ export function telegramTransport(api: TelegramApi, cfg: Config, log: (m: string
           },
         }
       : undefined;
+    // A document/photo → a `file` FileRef whose fetch() runs the SAME getFile→downloadFile path. Voice
+    // wins (audio set) so a message is never both; the largest photo size is chosen (fileAttachment).
+    const att = audio ? undefined : fileAttachment(m);
+    const file = att
+      ? {
+          filename: att.filename,
+          mimeType: att.mimeType,
+          size: att.size,
+          async fetch() {
+            const f = await api.getFile(att.fileId);
+            const bytes = await api.downloadFile(f.file_path);
+            return { bytes, filename: att.filename };
+          },
+        }
+      : undefined;
+    // A caption on a document/photo becomes the inbound text (routed with the saved-path reference line).
+    const text = typeof m.text === "string" ? m.text : typeof m.caption === "string" ? m.caption : "";
     return {
       chatId: m.chat.id,
       userId: m.from?.id,
       messageId: m.message_id,
-      text: typeof m.text === "string" ? m.text : "",
+      text,
       replyToId: m.reply_to_message?.message_id,
       audio,
+      file,
     };
   }
 
@@ -182,6 +258,11 @@ export function telegramTransport(api: TelegramApi, cfg: Config, log: (m: string
 
     async setCommands(cmds, scope) {
       await api.setMyCommands(cmds, toBotScope(scope));
+    },
+
+    async sendFile(chatId, opts) {
+      const sent = await api.sendDocument(chatId, opts.path, { filename: opts.filename, caption: opts.caption });
+      return { messageId: sent.message_id };
     },
 
     async run(onInbound, signal) {
@@ -280,6 +361,36 @@ export function httpApi(token: string): TelegramApi {
         message_id: messageId,
         reaction: emoji ? [{ type: "emoji", emoji }] : [],
       });
+    },
+    async sendDocument(chatId, path, opts) {
+      // Multipart upload of a LOCAL file — like the Groq transcriber, use global FormData/Blob/fetch so the
+      // boundary/content-type is set by FormData (NOT the JSON `call` helper). Read the bytes from disk.
+      // A missing/unreadable path (an agent's bad `[[file:…]]`) is PERMANENT — retrying can't make the file
+      // appear, so mark it permanent (ack + drop) instead of letting the bridge NAK it into a redelivery loop.
+      let bytes: Uint8Array;
+      try {
+        bytes = readFileSync(path);
+      } catch (e) {
+        throw new SendError(`telegram sendDocument: cannot read file "${path}": ${(e as Error).message}`, true, false);
+      }
+      const form = new FormData();
+      form.append("chat_id", String(chatId));
+      if (opts?.caption) form.append("caption", opts.caption);
+      form.append("document", new Blob([bytes]), opts?.filename || basename(path));
+      const ctl = new AbortController();
+      const timer = setTimeout(() => ctl.abort(), 120000);
+      try {
+        const res = await fetch(`${base}/sendDocument`, { method: "POST", body: form, signal: ctl.signal });
+        const json = (await res.json()) as { ok: boolean; result?: { message_id: number }; description?: string; error_code?: number };
+        if (!json.ok) {
+          const code = json.error_code ?? res.status;
+          const permanent = code >= 400 && code < 500 && code !== 429;
+          throw new TelegramApiError(`telegram sendDocument failed: ${json.description ?? res.status}`, code, permanent);
+        }
+        return json.result as { message_id: number };
+      } finally {
+        clearTimeout(timer);
+      }
     },
     async getFile(fileId) {
       const f = await call<{ file_id: string; file_path?: string }>("getFile", { file_id: fileId });

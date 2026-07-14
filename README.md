@@ -9,7 +9,8 @@ receives agent DMs in real time — no polling, no cursor contention. Zero paw c
 
 - **mesh → Telegram** — an agent DMs the `telegram` peer (or posts on the default channel the bridge
   subscribes to) → the bridge sends `"<agent>: <text>"` to every allowlisted Telegram chat, and
-  remembers the bot message so a swipe-reply threads back. The agent's **markdown is rendered**
+  remembers the bot message so a swipe-reply threads back. An agent can also **send a file back** by
+  emitting a `[[file:<abs-path>]]` directive (see [Sending files](#sending-files)). The agent's **markdown is rendered**
   (`**bold**`, `` `code` ``, links, …) via HTML `parse_mode` by default (`--no-markdown` to disable; a
   formatting 400 auto-retries as plain text). The bridge filters out its OWN echoed broadcasts so the
   human never gets their own outbound line back.
@@ -32,6 +33,12 @@ receives agent DMs in real time — no polling, no cursor contention. Zero paw c
 
   A **voice** message follows the exact same path — its transcript is routed and reacted like a typed
   message, with no `🎙 heard:` text mirror (only a transcription *failure* replies text).
+
+  A **document or photo** also follows the same path: the bridge downloads it, saves it to the per-space
+  downloads dir under a safe (basename-only, collision-suffixed) name, and routes a text reference
+  `📎 <filename> saved to <absolute-path>` (prefixed by any caption) onto the mesh — so a **local agent can
+  just read that path** (no binary crosses the mesh). A photo uses its **largest** size; the same
+  👀/⚡ send-signal reaction applies.
 
 `@all` unicasts to each present non-endpoint peer (a bare endpoint has no guaranteed everyone-channel),
 so the count = how many present agents it reached. It **cannot spawn** agents (a bare endpoint has no
@@ -71,16 +78,6 @@ being auto-trusted, the bridge does **not** learn a chat by default:
 
 The learned/seeded allowlist persists to `<state>/<space>/chats.json`.
 
-## Install
-
-```bash
-npm install
-```
-
-This package depends on [`@cotal-ai/endpoint-core`](https://github.com/caffeinum/cotal-endpoint-core),
-pulled in as a git dependency (`"@cotal-ai/endpoint-core": "github:caffeinum/cotal-endpoint-core"`), plus
-`@cotal-ai/core` from npm — `npm install` resolves both. No workspace or monorepo checkout is required.
-
 ## Run
 
 ```bash
@@ -91,8 +88,9 @@ TELEGRAM_BOT_TOKEN=… npx tsx bin/cotal-telegram.ts --space demo --creds ./tele
 ```
 
 Flags: `--server <nats-url>` · `--space <s>` · `--name <peer>` · `--channel <c>` · `--token <file|value>`
-· `--creds <file>` · `--groq-key <file|value>` · `--chat <id>` · `--learn-first-chat` · `--no-markdown`
-(alias `--plain`). The token may also come from `$TELEGRAM_BOT_TOKEN`, the Groq key from `$GROQ_API_KEY`.
+· `--creds <file>` · `--groq-key <file|value>` · `--chat <id>` · `--files-dir <dir>` · `--learn-first-chat`
+· `--no-markdown` (alias `--plain`). The token may also come from `$TELEGRAM_BOT_TOKEN`, the Groq key from
+`$GROQ_API_KEY`.
 
 **Markdown formatting (default ON):** agent output is rendered to Telegram so `**bold**`/`*bold*`,
 `_italic_`, `` `code` ``, ```` ``` ```` code blocks and `[text](url)` links actually format instead of
@@ -104,6 +102,28 @@ agent name are escaped as neutral text (never markdown-parsed), so a peer named 
 the markup. If Telegram ever rejects a formatted message with a 400, the bridge **auto-retries it as plain
 text** (parse_mode omitted) — a formatting edge can never lose a message. Slash-command replies and the
 `🎙 heard:` voice notice stay plain. Pass `--no-markdown` / `--plain` to disable formatting entirely.
+
+<a name="sending-files"></a>
+**Files (both directions):**
+
+- **Telegram → mesh (receive):** a message carrying a **document** or **photo** is downloaded and saved
+  to `<state>/<space>/files/` (override with `--files-dir <dir>`) under a sanitized, collision-suffixed
+  filename, then routed onto the mesh as the text `📎 <filename> saved to <absolute-path>` (with any
+  caption on its own line above it). A **local agent** can act on the saved path directly (`read`, run it,
+  etc.) — the binary itself never crosses the mesh. A photo's **largest** size is chosen; the routed
+  message gets the usual 👀 (single target) / ⚡ (broadcast) reaction, exactly like a typed message.
+- **mesh → Telegram (send):** an agent sends a file back by embedding a directive in its outgoing text:
+
+  ```
+  [[file:/absolute/path/to/report.pdf]]
+  [[file:/absolute/path/to/report.pdf|here is the report]]   # with a caption
+  ```
+
+  When the directive is present, the bridge **strips it** and uploads the local file via Telegram's
+  `sendDocument` (any leftover text — or the inline `|<caption>` — becomes the caption, prefixed with the
+  agent's `<from>:` label). The path must be readable by the bridge process. If the channel had no file
+  upload support the bridge would instead send the text **as-is** (graceful) — for Telegram, uploads are
+  always supported.
 
 **Voice messages:** a Telegram voice note / audio / video-note is transcribed via Groq Whisper
 (`whisper-large-v3-turbo`) and the transcript is routed onto the mesh EXACTLY like a typed message — so
@@ -124,5 +144,5 @@ npm run check:telegram   # hermetic: pure routing/format/allowlist + a fake tran
 npm run typecheck
 ```
 
-State (peer id pin, getUpdates offset, chat allowlist) lives under `$COTAL_TG_HOME` or
-`~/.cotal-telegram/<space>/`.
+State (peer id pin, getUpdates offset, chat allowlist, and inbound `files/`) lives under
+`$COTAL_TG_HOME` or `~/.cotal-telegram/<space>/` (the downloads dir is overridable with `--files-dir`).

@@ -18,14 +18,19 @@ import { EventEmitter } from "node:events";
 import { readOffset, type Inbound } from "@cotal-ai/endpoint-core";
 import type { Config } from "../src/config.js";
 import { parseArgs } from "../src/config.js";
+import { SendError } from "@cotal-ai/endpoint-core";
 import {
+  fileAttachment,
   groqFilename,
+  httpApi,
+  largestPhoto,
   TelegramApiError,
   telegramTransport,
   voiceFileId,
   type BotCommandScope,
   type TelegramApi,
   type TgMessage,
+  type TgPhotoSize,
   type TgUpdate,
 } from "../src/telegram.js";
 import { groqTranscriber, GROQ_MODEL } from "../src/transcribe.js";
@@ -55,6 +60,7 @@ class FakeApi implements TelegramApi {
   reactions: { chatId: number; messageId: number; emoji: string | undefined }[] = [];
   commandsSet: { commands: { command: string; description: string }[]; scope?: BotCommandScope }[] = [];
   downloads: string[] = [];
+  documents: { chatId: number; path: string; filename?: string; caption?: string }[] = [];
   deleteWebhookArgs: (boolean | undefined)[] = [];
   nextId = 1000;
   sendThrows?: (chatId: number, text: string, parseMode?: string) => void;
@@ -72,6 +78,10 @@ class FakeApi implements TelegramApi {
   }
   async setMessageReaction(chatId: number, messageId: number, emoji: string | undefined) {
     this.reactions.push({ chatId, messageId, emoji });
+  }
+  async sendDocument(chatId: number, path: string, opts?: { filename?: string; caption?: string }) {
+    this.documents.push({ chatId, path, filename: opts?.filename, caption: opts?.caption });
+    return { message_id: this.nextId++ };
   }
   async getFile(fileId: string) { return { file_id: fileId, file_path: `voice/${fileId}.oga` }; }
   async downloadFile(filePath: string) { this.downloads.push(filePath); return new Uint8Array([0x4f, 0x67, 0x67]); }
@@ -98,7 +108,7 @@ test("telegramTransport.run maps a text update → an Inbound (chatId/messageId/
   abort.abort();
   await loop;
   assert.equal(seen.length, 1);
-  assert.deepEqual(seen[0], { chatId: 42, userId: 9, messageId: 7, text: "hello", replyToId: 3, audio: undefined });
+  assert.deepEqual(seen[0], { chatId: 42, userId: 9, messageId: 7, text: "hello", replyToId: 3, audio: undefined, file: undefined });
 });
 
 test("telegramTransport.run maps a voice update → an Inbound whose audio.fetch downloads + normalizes the filename", async () => {
@@ -115,6 +125,73 @@ test("telegramTransport.run maps a voice update → an Inbound whose audio.fetch
   assert.ok(audioOut, "audio thunk produced bytes + a filename");
   assert.equal(audioOut!.filename, "AwAC.ogg", "the .oga file_path is normalized to .ogg");
   assert.deepEqual(api.downloads, ["voice/AwAC.oga"], "the voice file was downloaded");
+});
+
+// ── file attachment: document/photo mapping (pure, Telegram-specific) ──────────────────────────────
+test("largestPhoto: picks the biggest by file_size, else by pixel area", () => {
+  const sizes: TgPhotoSize[] = [
+    { file_id: "s", file_unique_id: "u1", width: 90, height: 90, file_size: 1000 },
+    { file_id: "m", file_unique_id: "u2", width: 320, height: 320, file_size: 8000 },
+    { file_id: "l", file_unique_id: "u3", width: 1280, height: 1280 }, // no file_size → area wins
+  ];
+  assert.equal(largestPhoto(sizes).file_id, "l", "the 1280px size (largest area) wins over smaller sized ones");
+  assert.equal(largestPhoto(sizes.slice(0, 2)).file_id, "m", "among sized ones, the biggest file_size wins");
+});
+
+test("fileAttachment: a document keeps its file_name; a photo synthesizes photo_<unique>.jpg; else undefined", () => {
+  assert.deepEqual(
+    fileAttachment({ document: { file_id: "d1", file_name: "report.pdf", mime_type: "application/pdf", file_size: 42 } } as TgMessage),
+    { fileId: "d1", filename: "report.pdf", mimeType: "application/pdf", size: 42 },
+  );
+  assert.deepEqual(
+    fileAttachment({ document: { file_id: "d2" } } as TgMessage),
+    { fileId: "d2", filename: "document_d2", mimeType: undefined, size: undefined },
+    "a nameless document falls back to document_<id>",
+  );
+  assert.deepEqual(
+    fileAttachment({ photo: [{ file_id: "p", file_unique_id: "UQ", width: 800, height: 600, file_size: 5 }] } as TgMessage),
+    { fileId: "p", filename: "photo_UQ.jpg", mimeType: "image/jpeg", size: 5 },
+  );
+  assert.equal(fileAttachment({ message_id: 1, chat: { id: 1, type: "private" }, text: "hi" } as TgMessage), undefined);
+  assert.equal(fileAttachment(undefined), undefined);
+});
+
+test("telegramTransport.run maps a document update → an Inbound whose file.fetch downloads it; caption → text", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "tg-"));
+  const api = new FakeApi();
+  api.updates.push([{ update_id: 1, message: { message_id: 1, chat: { id: 42, type: "private" }, caption: "@bob review", document: { file_id: "DOC1", file_name: "spec.pdf", mime_type: "application/pdf" } } as TgMessage }]);
+  let out: { bytes: Uint8Array; filename: string } | undefined;
+  let seenText: string | undefined;
+  let mime: string | undefined;
+  const tp = telegramTransport(api, cfgIn(dir));
+  const abort = new AbortController();
+  const loop = tp.run(async (inb) => { seenText = inb.text; mime = inb.file?.mimeType; if (inb.file) out = await inb.file.fetch(); }, abort.signal);
+  await tick();
+  abort.abort();
+  await loop;
+  assert.equal(seenText, "@bob review", "the caption became the inbound text");
+  assert.equal(mime, "application/pdf", "the document mime type is carried on the FileRef");
+  assert.ok(out, "the file thunk produced bytes + a filename");
+  assert.equal(out!.filename, "spec.pdf", "the document keeps its file_name");
+  assert.equal(api.downloads.length, 1, "the document was downloaded via getFile→downloadFile");
+});
+
+test("telegramTransport.sendFile uploads the local file via sendDocument (path + filename + caption)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "tg-"));
+  const api = new FakeApi();
+  const tp = telegramTransport(api, cfgIn(dir));
+  const res = await tp.sendFile!(42, { path: "/tmp/out.pdf", filename: "out.pdf", caption: "alice: here" });
+  assert.equal(res.messageId, 1000, "returns the sent message id");
+  assert.deepEqual(api.documents, [{ chatId: 42, path: "/tmp/out.pdf", filename: "out.pdf", caption: "alice: here" }]);
+});
+
+test("httpApi.sendDocument: a missing local file is a PERMANENT SendError (agent's bad [[file:…]] can't loop)", async () => {
+  const api = httpApi("123:ABC"); // no network hit — the readFileSync guard throws before any fetch
+  await assert.rejects(
+    () => api.sendDocument(42, "/definitely/not/a/real/file-xyz.pdf"),
+    (e: unknown) => e instanceof SendError && e.permanent === true,
+    "a missing file must fail PERMANENT (ack+drop) — a transient classification would NAK into a redelivery loop",
+  );
 });
 
 // ── run loop: offset persistence + first-run backlog + poison guard ────────────────────────────────
@@ -247,6 +324,7 @@ test("parseArgs fails loud on a dangling flag; --learn-first-chat is a boolean; 
   assert.deepEqual(parseArgs(["--learn-first-chat"]), { learnFirstChat: true });
   assert.deepEqual(parseArgs(["--space", "demo"]), { space: "demo" });
   assert.deepEqual(parseArgs(["--no-markdown"]), { markdown: false });
+  assert.deepEqual(parseArgs(["--files-dir", "/tmp/dl"]), { filesDir: "/tmp/dl" });
 });
 
 // ── real Groq request shape (fetch stubbed) ──────────────────────────────────────────────────────
