@@ -1,0 +1,31 @@
+{
+  "name": "@cotal-ai/endpoint-telegram",
+  "version": "0.1.0",
+  "description": "Standalone cotal mesh <-> Telegram bot bridge. Zero paw coupling; a thin Telegram Transport+Formatter over @cotal-ai/endpoint-core.",
+  "type": "module",
+  "license": "MIT",
+  "author": "caffeinum",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/caffeinum/cotal-endpoint-telegram.git"
+  },
+  "homepage": "https://github.com/caffeinum/cotal-endpoint-telegram#readme",
+  "bugs": "https://github.com/caffeinum/cotal-endpoint-telegram/issues",
+  "engines": { "node": ">=22" },
+  "bin": { "cotal-telegram": "bin/cotal-telegram.ts" },
+  "scripts": {
+    "start": "tsx bin/cotal-telegram.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "tsx --test test/*.test.ts",
+    "check:telegram": "tsx --test test/*.test.ts"
+  },
+  "dependencies": {
+    "@cotal-ai/core": "^0.11.3",
+    "@cotal-ai/endpoint-core": "github:caffeinum/cotal-endpoint-core"
+  },
+  "devDependencies": {
+    "@types/node": "22.19.19",
+    "tsx": "4.22.4",
+    "typescript": "5.9.3"
+  }
+}

@@ -1,0 +1,6 @@
+dist/
+node_modules/
+*.creds
+*.token
+tg-bot-token.txt
+*.tsbuildinfo
