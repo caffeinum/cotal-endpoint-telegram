@@ -1,0 +1,49 @@
+.gitignore
+  s_ed25aaaf9c7e77::t_01d21f23979818 1-6
+LICENSE
+  s_c48f6a65ab67f2::t_c6ed4ebd01ca73 1-21
+bin/cotal-telegram.ts
+  s_ed25aaaf9c7e77::t_171d3d0d9f52a4 1-37
+package.json
+  s_ed25aaaf9c7e77::t_3e5f3d3b06f013 1-31
+src/config.ts
+  s_ed25aaaf9c7e77::t_903ebc00fec459 1-122
+src/format.ts
+  s_ed25aaaf9c7e77::t_1351adda4b2b23 1-145
+src/telegram.ts
+  s_ed25aaaf9c7e77::t_410263e09ecda5 1-311
+src/transcribe.ts
+  s_ed25aaaf9c7e77::t_2c3ead650f388e 1-47
+test/format.test.ts
+  s_ed25aaaf9c7e77::t_1b89a07cdfb7ab 1-135
+test/telegram.test.ts
+  s_ed25aaaf9c7e77::t_2c450ee563aa0e 1-288
+tsconfig.json
+  s_ed25aaaf9c7e77::t_381b7dc439ce1e 1-17
+README.md
+  s_ed25aaaf9c7e77::t_3015efb727773b 1-128
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.13",
+  "base_commit_sha": "4c817a83c98b701f863d50200458ca457dbe6622",
+  "prompts": {},
+  "sessions": {
+    "s_c48f6a65ab67f2": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "7f80032f-782d-4839-9ccc-51171b35ee32",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Aleksey Bykhun <theisease@gmail.com>"
+    },
+    "s_ed25aaaf9c7e77": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "90dd1251-161e-469a-96db-040d1e555035",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Aleksey Bykhun <theisease@gmail.com>"
+    }
+  }
+}
