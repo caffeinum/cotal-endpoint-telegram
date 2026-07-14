@@ -1,0 +1,35 @@
+src/telegram.ts
+  s_ed25aaaf9c7e77::t_1dfae01f043441 106-112
+  s_ed25aaaf9c7e77::t_27cfb8e4c8422d 320-334
+  s_ed25aaaf9c7e77::t_5d5739656422d5 82-90
+  s_ed25aaaf9c7e77::t_9f4762abc77da7 368-372
+  s_ed25aaaf9c7e77::t_19b0624b50459b 456
+  s_ed25aaaf9c7e77::t_654c6abc80ac0c 12
+  s_ed25aaaf9c7e77::t_7b356d1719f145 67-75,79
+  s_ed25aaaf9c7e77::t_00d182c05b9004 357-367,373-374
+  s_ed25aaaf9c7e77::t_91b00d9754dc71 80,188-212
+  s_ed25aaaf9c7e77::t_08322c5a87969a 439-455
+  s_ed25aaaf9c7e77::t_df95f0c3b02dab 81
+test/telegram.test.ts
+  s_ed25aaaf9c7e77::t_db3ae0dd7e7caa 18
+  s_ed25aaaf9c7e77::t_011ee65bf51f5d 63-65,80,82,85-91
+  s_ed25aaaf9c7e77::t_093c8bd7b1b0d2 322
+  s_ed25aaaf9c7e77::t_2227c57bfd63d4 26,30,34-35
+  s_ed25aaaf9c7e77::t_4f00072e68cbb6 241-321,323-338
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.13",
+  "base_commit_sha": "c55ea8fda39fa650e2a27d5dddf2768913f948da",
+  "prompts": {},
+  "sessions": {
+    "s_ed25aaaf9c7e77": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "90dd1251-161e-469a-96db-040d1e555035",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Aleksey Bykhun <theisease@gmail.com>"
+    }
+  }
+}
