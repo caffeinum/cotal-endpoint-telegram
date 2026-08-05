@@ -1,0 +1,40 @@
+{
+  "name": "cotal-telegram",
+  "version": "0.1.0",
+  "description": "The cotal ↔ Telegram bridge as an installable cotal extension — `cotal telegram start|stop|status`.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "license": "MIT",
+  "author": "caffeinum",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/caffeinum/cotal-endpoint-telegram.git",
+    "directory": "extension"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "check:mesh": "node scripts/check-mesh.mjs"
+  },
+  "peerDependencies": {
+    "@cotal-ai/core": ">=0.14.0",
+    "@cotal-ai/workspace": ">=0.14.0"
+  },
+  "devDependencies": {
+    "@cotal-ai/core": "0.14.9",
+    "@cotal-ai/workspace": "0.14.9",
+    "@types/node": "22.19.19",
+    "esbuild": "0.28.1",
+    "typescript": "5.9.3"
+  }
+}

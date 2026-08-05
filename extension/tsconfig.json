@@ -1,0 +1,21 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "lib": ["ES2023"],
+    "types": ["node"],
+    "strict": true,
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "allowImportingTsExtensions": false,
+    "paths": {
+      // The SAME copy scripts/build.mjs bundles — the installed dependency, not a sibling clone.
+      // Two different sources here would let the build ship code the typecheck never saw.
+      "@cotal-ai/endpoint-core": ["../node_modules/@cotal-ai/endpoint-core/src/index.ts"]
+    }
+  },
+  "include": ["src/**/*.ts"]
+}
