@@ -21,6 +21,10 @@ export interface Config extends EndpointConfig {
    *  disables it (raw text, no parse_mode). A formatted message Telegram rejects with a 400 is auto-
    *  retried as plain text, so it can never be lost. */
   markdown: boolean;
+  /** The FORUM supergroup to organize into one topic per agent (`--topics <chat-id>`). Absent → the
+   *  organizer group is off entirely. Deliberately NOT one of the {@link seedChats}: the bridge must not
+   *  know this chat, or it would fan every line out to it a second time, unthreaded. */
+  topicsChat?: number;
 }
 
 const DEFAULT_SERVER = "nats://127.0.0.1:4222"; // core's DEFAULT_SERVER (kept literal so config has no core-runtime dep)
@@ -76,6 +80,8 @@ export interface RawArgs {
   wakeCommand?: string;
   /** Seconds `/wake` waits for it (`--wake-timeout`); absent → endpoint-core's default. */
   wakeTimeout?: string;
+  /** Set by `--topics <chat-id>`: the forum supergroup to organize into one topic per agent. */
+  topics?: string;
 }
 
 export function parseArgs(argv: string[]): RawArgs {
@@ -102,6 +108,7 @@ export function parseArgs(argv: string[]): RawArgs {
     else if (a === "--wake-command") out.wakeCommand = val(a, ++i);
     else if (a === "--wake-timeout") out.wakeTimeout = val(a, ++i);
     else if (a === "--learn-first-chat") out.learnFirstChat = true;
+    else if (a === "--topics") out.topics = val(a, ++i);
     else if (a === "--no-markdown" || a === "--plain") out.markdown = false;
     else throw new Error(`cotal-telegram: unknown flag "${a}"`);
   }
@@ -124,6 +131,7 @@ export function buildConfig(raw: RawArgs): Config {
     seedChats,
     learnFirstChat: raw.learnFirstChat ?? false,
     markdown: raw.markdown ?? true,
+    topicsChat: raw.topics === undefined ? undefined : topicsChatOrThrow(raw.topics),
     filesDir: raw.filesDir,
     helpFooter: raw.helpFooter ?? process.env.COTAL_TG_HELP_FOOTER,
     wakeCommand: raw.wakeCommand ?? process.env.COTAL_TG_WAKE_COMMAND,
@@ -136,6 +144,17 @@ export function buildConfig(raw: RawArgs): Config {
 function wakeSecsOrThrow(s: string): number {
   const n = Number(s);
   if (!Number.isFinite(n) || n <= 0) throw new Error(`cotal-telegram: --wake-timeout expects seconds, got "${s}"`);
+  return n;
+}
+
+/** A forum supergroup id is negative and starts -100 — fail loud on a positive/user id rather than
+ *  silently organizing nothing (the mirror would just never match a chat). */
+function topicsChatOrThrow(s: string): number {
+  const n = Number(s);
+  if (!Number.isInteger(n)) throw new Error(`cotal-telegram: --topics expects a numeric chat id, got "${s}"`);
+  if (n >= 0) {
+    throw new Error(`cotal-telegram: --topics expects a SUPERGROUP id (negative, e.g. -100…), got "${s}"`);
+  }
   return n;
 }
 

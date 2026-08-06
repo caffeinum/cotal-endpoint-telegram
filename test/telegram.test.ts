@@ -60,16 +60,24 @@ test("groqFilename: Telegram .oga → .ogg; accepted extensions kept; missing �
 // ── a fake low-level Telegram Bot API ──────────────────────────────────────────────────────────────
 class FakeApi implements TelegramApi {
   updates: TgUpdate[][] = [];
-  sends: { chatId: number; text: string; parse_mode?: string; reply_to?: number; reply_markup?: TgInlineKeyboard }[] = [];
+  sends: { chatId: number; text: string; parse_mode?: string; reply_to?: number; reply_markup?: TgInlineKeyboard; thread?: number }[] = [];
   edits: { chatId: number; messageId: number; text: string; parse_mode?: string; reply_markup?: TgInlineKeyboard }[] = [];
   answers: { callbackId: string; text?: string }[] = [];
   reactions: { chatId: number; messageId: number; emoji: string | undefined }[] = [];
   commandsSet: { commands: { command: string; description: string }[]; scope?: BotCommandScope }[] = [];
   downloads: string[] = [];
-  documents: { chatId: number; path: string; filename?: string; caption?: string }[] = [];
+  documents: { chatId: number; path: string; filename?: string; caption?: string; thread?: number }[] = [];
+  /** Chats the fake reports as forums (`getChat().is_forum`) + every createForumTopic call. */
+  forums = new Set<number>();
+  topicsCreated: { chatId: number; name: string; iconColor?: number }[] = [];
+  nextThreadId = 100;
+  createTopicThrows?: () => void;
+  isForumThrows?: () => void;
   deleteWebhookArgs: (boolean | undefined)[] = [];
   nextId = 1000;
   sendThrows?: (chatId: number, text: string, parseMode?: string) => void;
+  /** Simulate a send into a DELETED topic (Telegram's `message thread not found`). */
+  threadSendThrows?: (chatId: number, threadId?: number) => void;
   async getMe() { return { id: 1, username: "candlestick_dev_bot" }; }
   async getUpdates() {
     const batch = this.updates.shift();
@@ -77,9 +85,12 @@ class FakeApi implements TelegramApi {
     await new Promise((r) => setTimeout(r, 10));
     return [];
   }
-  async sendMessage(chatId: number, text: string, opts?: { reply_to_message_id?: number; parse_mode?: string; reply_markup?: TgInlineKeyboard }) {
+  async sendMessage(chatId: number, text: string, opts?: { reply_to_message_id?: number; parse_mode?: string; reply_markup?: TgInlineKeyboard; message_thread_id?: number }) {
     this.sendThrows?.(chatId, text, opts?.parse_mode);
-    this.sends.push({ chatId, text, parse_mode: opts?.parse_mode, reply_to: opts?.reply_to_message_id, reply_markup: opts?.reply_markup });
+    this.threadSendThrows?.(chatId, opts?.message_thread_id);
+    const rec: { chatId: number; text: string; parse_mode?: string; reply_to?: number; reply_markup?: TgInlineKeyboard; thread?: number } = { chatId, text, parse_mode: opts?.parse_mode, reply_to: opts?.reply_to_message_id, reply_markup: opts?.reply_markup };
+    if (opts?.message_thread_id !== undefined) rec.thread = opts.message_thread_id;
+    this.sends.push(rec);
     return { message_id: this.nextId++ };
   }
   async editMessageText(chatId: number, messageId: number, text: string, opts?: { parse_mode?: string; reply_markup?: TgInlineKeyboard }) {
@@ -92,9 +103,21 @@ class FakeApi implements TelegramApi {
   async setMessageReaction(chatId: number, messageId: number, emoji: string | undefined) {
     this.reactions.push({ chatId, messageId, emoji });
   }
-  async sendDocument(chatId: number, path: string, opts?: { filename?: string; caption?: string }) {
-    this.documents.push({ chatId, path, filename: opts?.filename, caption: opts?.caption });
+  async sendDocument(chatId: number, path: string, opts?: { filename?: string; caption?: string; message_thread_id?: number }) {
+    this.threadSendThrows?.(chatId, opts?.message_thread_id);
+    const rec: { chatId: number; path: string; filename?: string; caption?: string; thread?: number } = { chatId, path, filename: opts?.filename, caption: opts?.caption };
+    if (opts?.message_thread_id !== undefined) rec.thread = opts.message_thread_id;
+    this.documents.push(rec);
     return { message_id: this.nextId++ };
+  }
+  async isForum(chatId: number) {
+    this.isForumThrows?.();
+    return this.forums.has(chatId);
+  }
+  async createForumTopic(chatId: number, name: string, iconColor?: number) {
+    this.createTopicThrows?.();
+    this.topicsCreated.push({ chatId, name, iconColor });
+    return { message_thread_id: this.nextThreadId++ };
   }
   async getFile(fileId: string) { return { file_id: fileId, file_path: `voice/${fileId}.oga` }; }
   async downloadFile(filePath: string) { this.downloads.push(filePath); return new Uint8Array([0x4f, 0x67, 0x67]); }
@@ -475,3 +498,4 @@ test("groqTranscriber: a non-2xx response throws with the status + body", async 
     globalThis.fetch = realFetch;
   }
 });
+

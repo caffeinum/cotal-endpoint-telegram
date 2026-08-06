@@ -62,6 +62,12 @@ export interface TgMessage {
   document?: TgDocument;
   /** A photo — an array of sizes (largest chosen for download). */
   photo?: TgPhotoSize[];
+  /** The forum topic (or non-forum reply thread) this message belongs to. NOT proof of a topic on its
+   *  own — a non-forum chat's reply threads populate it too; only `is_topic_message` distinguishes. */
+  message_thread_id?: number;
+  /** True ONLY for a message in a real forum topic. Absent for the General topic (which has no thread
+   *  id at all) and for a non-forum reply thread. */
+  is_topic_message?: boolean;
 }
 
 /** A tap on an inline-keyboard button. `message` is the button message (present for a fresh tap, absent
@@ -103,7 +109,7 @@ export interface TelegramApi {
   /** Long-poll. `signal` lets the caller abort the in-flight request (so stop() doesn't block on
    *  the ~40s HTTP timeout of a parked long-poll). */
   getUpdates(offset: number, timeoutSec: number, signal?: AbortSignal): Promise<TgUpdate[]>;
-  sendMessage(chatId: number, text: string, opts?: { reply_to_message_id?: number; parse_mode?: "HTML" | "MarkdownV2" | "Markdown"; reply_markup?: TgInlineKeyboard }): Promise<{ message_id: number }>;
+  sendMessage(chatId: number, text: string, opts?: { reply_to_message_id?: number; parse_mode?: "HTML" | "MarkdownV2" | "Markdown"; reply_markup?: TgInlineKeyboard; message_thread_id?: number }): Promise<{ message_id: number }>;
   /** Edit an already-sent message's text in place (Bot API `editMessageText`). Omitting `reply_markup`
    *  drops the message's inline keyboard (the tap already happened). */
   editMessageText(chatId: number, messageId: number, text: string, opts?: { parse_mode?: "HTML" | "MarkdownV2" | "Markdown"; reply_markup?: TgInlineKeyboard }): Promise<{ message_id: number }>;
@@ -115,7 +121,13 @@ export interface TelegramApi {
   setMessageReaction(chatId: number, messageId: number, emoji: string | undefined): Promise<void>;
   /** Upload a LOCAL file (read from `path` on disk) to a chat via Telegram's `sendDocument` (multipart).
    *  `filename` labels the upload (defaults to the path basename); `caption` is optional. */
-  sendDocument(chatId: number, path: string, opts?: { filename?: string; caption?: string }): Promise<{ message_id: number }>;
+  sendDocument(chatId: number, path: string, opts?: { filename?: string; caption?: string; message_thread_id?: number }): Promise<{ message_id: number }>;
+  /** Is this chat a forum (topics enabled)? `getChat().is_forum` — the ONLY way to know, and the gate on
+   *  every topic operation. */
+  isForum(chatId: number): Promise<boolean>;
+  /** Create a forum topic and return its `message_thread_id`. Requires the bot to be an admin with
+   *  `can_manage_topics` in an ALREADY-forum supergroup (a bot can enable neither). */
+  createForumTopic(chatId: number, name: string, iconColor?: number): Promise<{ message_thread_id: number }>;
   /** Resolve a `file_id` to a `file_path` (Telegram's getFile). The path feeds `downloadFile`. */
   getFile(fileId: string): Promise<{ file_id: string; file_path: string }>;
   /** Download a file's raw bytes from `https://api.telegram.org/file/bot<token>/<file_path>`. */
@@ -238,7 +250,15 @@ const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
  * {@link Inbound} (voice → an `audio` fetch thunk that downloads + normalizes the filename), and is
  * POISON-GUARDED (a throwing handler is logged + skipped, the offset still advances).
  */
-export function telegramTransport(api: TelegramApi, cfg: Config, log: (m: string) => void = () => {}): Transport {
+export function telegramTransport(
+  api: TelegramApi,
+  cfg: Config,
+  log: (m: string) => void = () => {},
+  /** The organizer group's inbound hook. Returns true when it OWNED the update, in which case the bridge
+   *  never sees it — that group is handled end to end by src/group.ts, so the two can't double-handle a
+   *  message or contend for the one long-poll cursor. */
+  onGroupUpdate?: (m: TgMessage) => Promise<boolean>,
+): Transport {
   /** Map one Telegram update to a channel-agnostic Inbound (undefined for a message-less update). */
   function toInbound(u: TgUpdate): Inbound | undefined {
     const m = u.message;
@@ -344,7 +364,19 @@ export function telegramTransport(api: TelegramApi, cfg: Config, log: (m: string
           continue;
         }
         for (const u of ups) {
-          const inbound = toInbound(u);
+          // The organizer group first: it owns its own chat completely (delivery AND routing), so an
+          // update there must not also reach the bridge. Poison-guarded like everything else in this
+          // loop — a throwing handler is logged and the cursor still advances.
+          let ownedByGroup = false;
+          if (onGroupUpdate && u.message) {
+            try {
+              ownedByGroup = await onGroupUpdate(u.message);
+            } catch (e) {
+              log(`group handler failed for update ${u.update_id} (skipping): ${(e as Error).message}`);
+              ownedByGroup = true; // it WAS the group's message; don't hand a half-handled one to the bridge
+            }
+          }
+          const inbound = ownedByGroup ? undefined : toInbound(u);
           if (inbound) {
             try {
               await onInbound(inbound);
@@ -433,6 +465,9 @@ export function httpApi(token: string): TelegramApi {
       return call<{ message_id: number }>("sendMessage", {
         chat_id: chatId,
         text,
+        // The forum topic to post into. OMITTED when undefined — Telegram rejects `message_thread_id: 1`
+        // (the General topic), and General/no-topic is expressed by the field's ABSENCE, not by a value.
+        message_thread_id: opts?.message_thread_id,
         reply_to_message_id: opts?.reply_to_message_id,
         // parse_mode is omitted entirely when undefined (plain text) — a null/"" would be a bad request.
         parse_mode: opts?.parse_mode,
@@ -477,6 +512,7 @@ export function httpApi(token: string): TelegramApi {
       }
       const form = new FormData();
       form.append("chat_id", String(chatId));
+      if (opts?.message_thread_id !== undefined) form.append("message_thread_id", String(opts.message_thread_id));
       if (opts?.caption) form.append("caption", opts.caption);
       form.append("document", new Blob([bytes]), opts?.filename || basename(path));
       const ctl = new AbortController();
@@ -493,6 +529,17 @@ export function httpApi(token: string): TelegramApi {
       } finally {
         clearTimeout(timer);
       }
+    },
+    async isForum(chatId) {
+      const chat = await call<{ is_forum?: boolean }>("getChat", { chat_id: chatId });
+      return chat.is_forum === true;
+    },
+    async createForumTopic(chatId, name, iconColor) {
+      return call<{ message_thread_id: number }>("createForumTopic", {
+        chat_id: chatId,
+        name,
+        icon_color: iconColor,
+      });
     },
     async getFile(fileId) {
       const f = await call<{ file_id: string; file_path?: string }>("getFile", { file_id: fileId });
