@@ -1,0 +1,29 @@
+src/busy.ts
+  s_31267c8ce90feb::t_6ea613b6cd0239 1-131
+bin/cotal-telegram.ts
+  s_31267c8ce90feb::t_956c8ad63e4420 18,37-46,48,67
+test/busy.test.ts
+  s_31267c8ce90feb::t_78cf7ed3a551ba 1-77
+test/group.test.ts
+  s_31267c8ce90feb::t_f533f9c78d3ccc 668-773
+src/group.ts
+  s_31267c8ce90feb::t_956c8ad63e4420 37,63-65,122-125,132,140,477-489,491-501
+README.md
+  s_31267c8ce90feb::t_3ae944f354cddf 183
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.21",
+  "base_commit_sha": "3b1cf7185f5ac23fd2b7fe61be4ec116ba1568a4",
+  "prompts": {},
+  "sessions": {
+    "s_31267c8ce90feb": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "46561531-ea8a-43c3-9869-c191886dd057",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Aleksey Bykhun <theisease@gmail.com>"
+    }
+  }
+}
