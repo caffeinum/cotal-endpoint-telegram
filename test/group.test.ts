@@ -665,3 +665,109 @@ test("channel keys can't collide with an agent of the same name", async () => {
   await tick();
   assert.deepEqual(api.topicsCreated.map((t) => t.name), ["#general", "general"], "two distinct topics");
 });
+
+// ── busy overrides a presence "idle" that is simply wrong ─────────────────────────────────────────
+// Presence publishes `working` only on a human prompt, so a mesh-triggered turn reads `idle` for its
+// whole duration AND emits no event. Without this the ⚡️ icon would essentially never fire.
+import { BusyTracker } from "../src/busy.js";
+
+const busyRows = (...r: unknown[]) => JSON.stringify({ space: "t", rows: r });
+
+function mirrorWithBusy(dir: string, api: FakeApi, ep: FakeEndpoint, busy: BusyTracker): GroupMirror {
+  return attachGroupMirror({
+    ep: ep as never, api: api as unknown as TelegramApi, cfg: cfgIn(dir),
+    formatter: telegramFormatter(true), maxLen: 4096, busy, log: () => {},
+  });
+}
+
+test("an agent presence calls idle but is really mid-turn gets ⚡️, not ✅", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "tg-"));
+  const api = new FakeApi();
+  const ep = new FakeEndpoint();
+  const busy = new BusyTracker({ space: "t", probe: async () => busyRows({ name: "alice", busy: true }) });
+  await busy.tick();
+  mirrorWithBusy(dir, api, ep, busy).start();
+  await tick();
+  ep.emit("presence", { type: "join", presence: agent("alice", "idle") });
+  await tick();
+  assert.deepEqual(api.iconEdits.map((e) => e.customEmojiId), ["id-bolt"], "the transcript beat the wrong presence");
+});
+
+test("with NO opinion from the tracker, presence is left exactly as it was", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "tg-"));
+  const api = new FakeApi();
+  const ep = new FakeEndpoint();
+  const busy = new BusyTracker({ space: "t", probe: async () => undefined }); // paw absent
+  await busy.tick();
+  mirrorWithBusy(dir, api, ep, busy).start();
+  await tick();
+  ep.emit("presence", { type: "join", presence: agent("alice", "idle") });
+  await tick();
+  assert.deepEqual(api.iconEdits.map((e) => e.customEmojiId), ["id-check"], "no paw → behaves exactly as before");
+});
+
+test("the agent's OWN claim still wins — waiting is never overwritten by busy", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "tg-"));
+  const api = new FakeApi();
+  const ep = new FakeEndpoint();
+  const busy = new BusyTracker({ space: "t", probe: async () => busyRows({ name: "alice", busy: true }) });
+  await busy.tick();
+  mirrorWithBusy(dir, api, ep, busy).start();
+  await tick();
+  ep.emit("presence", { type: "join", presence: agent("alice", "waiting") });
+  await tick();
+  assert.deepEqual(api.iconEdits.map((e) => e.customEmojiId), ["id-eyes"], "👀 survives");
+});
+
+test("offline is never overridden — a dead agent is not 'busy'", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "tg-"));
+  const api = new FakeApi();
+  const ep = new FakeEndpoint();
+  const busy = new BusyTracker({ space: "t", probe: async () => busyRows({ name: "alice", busy: true }) });
+  await busy.tick();
+  mirrorWithBusy(dir, api, ep, busy).start();
+  await tick();
+  ep.emit("presence", { type: "join", presence: agent("alice", "idle") });
+  await tick();
+  ep.emit("presence", { type: "offline", presence: agent("alice", "offline") });
+  await tick();
+  assert.equal(api.iconEdits.at(-1)!.customEmojiId, "id-coffee");
+});
+
+test("refreshStatus restamps when only BUSY changed — presence never fires for that turn", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "tg-"));
+  const api = new FakeApi();
+  const ep = new FakeEndpoint();
+  let working = false;
+  const busy = new BusyTracker({ space: "t", probe: async () => busyRows({ name: "alice", busy: working }) });
+  await busy.tick();
+  const m = mirrorWithBusy(dir, api, ep, busy);
+  m.start();
+  await tick();
+  ep.emit("presence", { type: "join", presence: agent("alice", "idle") });
+  await tick();
+  assert.deepEqual(api.iconEdits.map((e) => e.customEmojiId), ["id-check"], "idle at first");
+  // The turn starts. Presence stays idle and emits nothing — only the tracker notices.
+  working = true;
+  await busy.tick();
+  await m.refreshStatus("alice");
+  assert.deepEqual(api.iconEdits.map((e) => e.customEmojiId), ["id-check", "id-bolt"]);
+  // ...and back to idle when the turn closes.
+  working = false;
+  await busy.tick();
+  await m.refreshStatus("alice");
+  assert.deepEqual(api.iconEdits.map((e) => e.customEmojiId), ["id-check", "id-bolt", "id-check"]);
+});
+
+test("refreshStatus for an agent never seen through presence is a no-op", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "tg-"));
+  const api = new FakeApi();
+  const ep = new FakeEndpoint();
+  const busy = new BusyTracker({ space: "t", probe: async () => busyRows({ name: "ghost", busy: true }) });
+  await busy.tick();
+  const m = mirrorWithBusy(dir, api, ep, busy);
+  m.start();
+  await tick();
+  await m.refreshStatus("ghost");
+  assert.deepEqual(api.iconEdits, []);
+});

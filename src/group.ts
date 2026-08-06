@@ -34,6 +34,7 @@ import {
 } from "@cotal-ai/endpoint-core";
 import type { Config } from "./config.js";
 import { fileAttachment, groqFilename, voiceFileId, type TelegramApi, type TgMessage } from "./telegram.js";
+import type { BusyTracker } from "./busy.js";
 import { isMissingThread, TopicRegistry } from "./topics.js";
 
 /** A mesh peer as it appears in presence/roster. */
@@ -59,6 +60,9 @@ export interface GroupMirrorDeps {
   /** Voice transcription for messages spoken into a topic. Absent → voice is skipped gracefully
    *  (logged, answered in the topic), exactly as the DM leg behaves with no key. */
   transcriber?: Transcriber;
+  /** A truer "is this agent working" than presence reports — see src/busy.ts for why presence can't be
+   *  trusted alone. Absent → status comes from presence only. */
+  busy?: BusyTracker;
   log?: (m: string) => void;
 }
 
@@ -115,13 +119,17 @@ export class GroupMirror {
   private readonly maxLen: number;
   private readonly log: (m: string) => void;
   private readonly transcriber?: Transcriber;
+  private readonly busy?: BusyTracker;
+  /** Last status each agent reported through presence, so a busy-only change can be re-resolved without
+   *  waiting for the next presence event (which, for a mesh-triggered turn, never comes). */
+  private readonly lastStatus = new Map<string, string>();
   private readonly topics: TopicRegistry;
   /** Lazily-resolved emoji → custom_emoji_id map for the bot-allowed icon pack. */
   private iconPack?: Promise<Map<string, string>>;
   /** The group this mirror owns — every method is a no-op for any other chat. */
   readonly chatId: number;
 
-  constructor({ ep, api, cfg, formatter, maxLen, transcriber, log = () => {} }: GroupMirrorDeps) {
+  constructor({ ep, api, cfg, formatter, maxLen, transcriber, busy, log = () => {} }: GroupMirrorDeps) {
     this.ep = ep;
     this.api = api;
     this.cfg = cfg;
@@ -129,6 +137,7 @@ export class GroupMirror {
     this.maxLen = maxLen;
     this.log = log;
     this.transcriber = transcriber;
+    this.busy = busy;
     this.topics = new TopicRegistry(api, cfg, log);
     // Non-null by construction: the composition root only builds a mirror when --topics gave a chat id.
     this.chatId = cfg.topicsChat as number;
@@ -465,9 +474,31 @@ export class GroupMirror {
    *
    * Entirely best-effort: an icon is decoration, and must never interfere with delivery.
    */
+  /**
+   * The status to SHOW for an agent, which is not always the one presence reports.
+   *
+   * `working`/`waiting` are the agent's own claim and always win. Otherwise, if the busy tracker has an
+   * opinion, it decides — presence publishes `working` only for human-prompted turns, so an agent
+   * mid-way through a mesh-triggered turn reports `idle` while genuinely working. A tracker with NO
+   * opinion (paw absent, agent unknown) leaves presence untouched rather than asserting anything.
+   */
+  private effectiveStatus(agent: string, status: string): string {
+    if (status === "working" || status === "waiting" || status === "offline") return status;
+    return this.busy?.isBusy(agent) === true ? "working" : status;
+  }
+
   private async applyStatusIcon(agent: string, status: string): Promise<void> {
-    const emoji = STATUS_ICONS[status];
-    if (emoji) await this.applyIcon(agent, emoji, status);
+    this.lastStatus.set(agent, status);
+    const emoji = STATUS_ICONS[this.effectiveStatus(agent, status)];
+    if (emoji) await this.applyIcon(agent, emoji, this.effectiveStatus(agent, status));
+  }
+
+  /** Re-resolve one agent's icon after the busy tracker changed its mind. Presence hasn't moved — that's
+   *  the whole bug — so this is the only thing that will ever restamp a mesh-triggered turn. */
+  async refreshStatus(agent: string): Promise<void> {
+    const status = this.lastStatus.get(agent);
+    if (status === undefined) return; // never seen through presence → no topic to restamp yet
+    await this.applyStatusIcon(agent, status);
   }
 
   /** Stamp `key`'s topic with `emoji`, if it isn't already wearing it. */

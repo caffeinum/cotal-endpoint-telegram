@@ -15,6 +15,7 @@
  */
 import { buildEndpoint, runBridge } from "@cotal-ai/endpoint-core";
 import { buildConfig, parseArgs } from "../src/config.js";
+import { BusyTracker } from "../src/busy.js";
 import { attachGroupMirror } from "../src/group.js";
 import { httpApi, telegramTransport } from "../src/telegram.js";
 import { telegramFormatter } from "../src/format.js";
@@ -33,8 +34,18 @@ async function main(): Promise<void> {
   // Voice transcription is OPTIONAL: build the real Groq transcriber from the configured key, else
   // undefined → voice messages are skipped gracefully (logged, not fatal). Shared by BOTH legs.
   const transcriber = cfg.groqKey ? groqTranscriber(cfg.groqKey) : undefined;
+  // Presence under-reports `working` (it fires only on a human prompt), so a mesh-triggered turn would
+  // show as idle forever. The tracker polls a truer signal; absent paw, it simply has no opinion and the
+  // icons fall back to presence exactly as before.
+  const busy = cfg.topicsChat
+    ? new BusyTracker({
+        space: cfg.space,
+        log,
+        onChange: (agent) => void mirror?.refreshStatus(agent),
+      })
+    : undefined;
   const mirror = cfg.topicsChat
-    ? attachGroupMirror({ ep, api, cfg, formatter: telegramFormatter(cfg.markdown), maxLen: TELEGRAM_MAX, transcriber, log })
+    ? attachGroupMirror({ ep, api, cfg, formatter: telegramFormatter(cfg.markdown), maxLen: TELEGRAM_MAX, transcriber, busy, log })
     : undefined;
 
   // `/wake` follow-through: once the woken agent is actually on the mesh, point the chat at it. The WAIT
@@ -53,6 +64,7 @@ async function main(): Promise<void> {
   // AFTER runBridge: it calls ep.start(), and the roster seed needs a connected presence watch.
   if (mirror) {
     mirror.start();
+    busy?.start();
     log(`organizer group ${mirror.chatId}: one topic per agent`);
   }
 
