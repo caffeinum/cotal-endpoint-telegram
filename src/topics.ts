@@ -147,21 +147,14 @@ export class TopicRegistry {
   }
 
   /**
-   * The {@link Transport.threadFor} implementation: which topic of `chatId` this agent's line belongs in.
-   * Returns undefined for a chat that isn't a forum (the operator's 1:1 DM keeps receiving the whole
-   * stream unthreaded — that's what makes the group a mirror rather than a move).
+   * This agent's topic in `chatId`, creating it if we have none. Returns undefined when the chat isn't a
+   * forum — the operator's 1:1 DM has no topics, and asking for one there is a no-op, not an error.
    *
-   * Throws only if the topic CREATION fails; the bridge catches that and sends unthreaded, so a rate
-   * limit or a revoked admin right degrades to today's behavior instead of losing the message.
+   * Throws only if the CREATION itself fails, so the caller can decide (the mirror falls back to posting
+   * in General rather than dropping the agent's line).
    */
-  async threadFor(chatId: number, sender: { name: string; id: string }): Promise<number | undefined> {
-    if (!(await this.isForum(chatId))) return undefined;
-    return this.ensure(chatId, sender.name);
-  }
-
-  /** This agent's topic in `chatId`, creating it if we have none. Public so the transport can re-ensure
-   *  after Telegram reports the old topic is gone (the recreate half of {@link forget}). */
   async ensure(chatId: number, agent: string): Promise<number | undefined> {
+    if (!(await this.isForum(chatId))) return undefined;
     const known = this.file.chats[String(chatId)]?.[agent];
     if (known !== undefined) return known;
     return this.create(chatId, agent);

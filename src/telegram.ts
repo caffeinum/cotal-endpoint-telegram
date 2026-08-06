@@ -13,7 +13,6 @@ import { SendError, type ButtonChoice, type CallbackQuery, type CommandDesc, typ
 import { readOffset, writeOffset } from "@cotal-ai/endpoint-core";
 import type { Config } from "./config.js";
 import { telegramFormatter } from "./format.js";
-import { isMissingThread, TopicRegistry } from "./topics.js";
 
 export interface TgUser {
   id: number;
@@ -251,40 +250,15 @@ const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
  * {@link Inbound} (voice → an `audio` fetch thunk that downloads + normalizes the filename), and is
  * POISON-GUARDED (a throwing handler is logged + skipped, the offset still advances).
  */
-export function telegramTransport(api: TelegramApi, cfg: Config, log: (m: string) => void = () => {}): Transport {
-  // Per-agent forum topics, only when the operator opted in. Absent → `threadFor` is not exposed at all
-  // and endpoint-core takes its unthreaded path, byte-for-byte as before.
-  const topics = cfg.topics ? new TopicRegistry(api, cfg, log) : undefined;
-
-  /** Sentinel for "this failure is not a missing topic — rethrow it untouched". Distinct from
-   *  `undefined`, which is a REAL outcome here: retry the send with no topic at all. */
-  const NO_RECOVERY = Symbol("no-recovery");
-
-  /**
-   * A topic deleted in the Telegram app is invisible to a bot — there's no deletion update and no way to
-   * probe a thread id — so a failed send is the ONLY signal we ever get. On `message thread not found`:
-   * drop the stale mapping, recreate the agent's topic, and report the id to retry in.
-   *
-   * If the recreate ALSO fails (rate limit, admin right revoked, forum turned off), fall back to
-   * `undefined` = send unthreaded. Losing the agent's message would be a strictly worse outcome than
-   * delivering it to the group's General topic.
-   */
-  async function recoverThread(
-    chatId: number,
-    threadId: number | undefined,
-    e: unknown,
-  ): Promise<number | undefined | typeof NO_RECOVERY> {
-    if (!topics || threadId === undefined || !isMissingThread(e)) return NO_RECOVERY;
-    const agent = topics.agentOf(chatId, threadId);
-    topics.forget(chatId, threadId);
-    if (!agent) return undefined; // a thread we never created — just retry unthreaded
-    try {
-      return await topics.ensure(chatId, agent);
-    } catch (e2) {
-      log(`couldn't recreate topic for "${agent}" (sending unthreaded): ${(e2 as Error).message}`);
-      return undefined;
-    }
-  }
+export function telegramTransport(
+  api: TelegramApi,
+  cfg: Config,
+  log: (m: string) => void = () => {},
+  /** The organizer group's inbound hook. Returns true when it OWNED the update, in which case the bridge
+   *  never sees it — that group is handled end to end by src/group.ts, so the two can't double-handle a
+   *  message or contend for the one long-poll cursor. */
+  onGroupUpdate?: (m: TgMessage) => Promise<boolean>,
+): Transport {
   /** Map one Telegram update to a channel-agnostic Inbound (undefined for a message-less update). */
   function toInbound(u: TgUpdate): Inbound | undefined {
     const m = u.message;
@@ -324,12 +298,6 @@ export function telegramTransport(api: TelegramApi, cfg: Config, log: (m: string
       replyToId: m.reply_to_message?.message_id,
       audio,
       file,
-      // ONLY a real forum topic sets threadId. `message_thread_id` alone is not enough: a non-forum
-      // chat's reply threads populate it too, and treating those as topics would fragment one chat's
-      // sticky target across every reply chain. The General topic has neither field — correctly absent,
-      // since "General" and "no topic" are the same destination on the wire. The key is OMITTED (not set
-      // to undefined) so a non-topic Inbound keeps its exact pre-threads shape.
-      ...(m.is_topic_message === true && m.message_thread_id !== undefined ? { threadId: m.message_thread_id } : {}),
     };
   }
 
@@ -349,26 +317,12 @@ export function telegramTransport(api: TelegramApi, cfg: Config, log: (m: string
     },
 
     async send(chatId, text, opts) {
-      const send = (threadId: number | undefined) =>
-        api.sendMessage(chatId, text, {
-          reply_to_message_id: opts?.replyTo,
-          parse_mode: opts?.mode as "HTML" | undefined,
-          message_thread_id: threadId,
-        });
-      try {
-        const sent = await send(opts?.threadId);
-        return { messageId: sent.message_id };
-      } catch (e) {
-        const retryThread = await recoverThread(chatId, opts?.threadId, e);
-        if (retryThread === NO_RECOVERY) throw e;
-        const sent = await send(retryThread);
-        return { messageId: sent.message_id };
-      }
+      const sent = await api.sendMessage(chatId, text, {
+        reply_to_message_id: opts?.replyTo,
+        parse_mode: opts?.mode as "HTML" | undefined,
+      });
+      return { messageId: sent.message_id };
     },
-
-    // Per-agent topics: "which topic of this chat does this sender's line belong in". Only present when
-    // the operator opted in — its ABSENCE is what keeps the unthreaded path unchanged.
-    threadFor: topics ? (chatId, sender) => topics.threadFor(chatId, sender) : undefined,
 
     async setReaction(chatId, messageId, reaction) {
       await api.setMessageReaction(chatId, messageId, reaction);
@@ -379,21 +333,12 @@ export function telegramTransport(api: TelegramApi, cfg: Config, log: (m: string
     },
 
     async sendFile(chatId, opts) {
-      const upload = (threadId: number | undefined) =>
-        api.sendDocument(chatId, opts.path, { filename: opts.filename, caption: opts.caption, message_thread_id: threadId });
-      try {
-        const sent = await upload(opts.threadId);
-        return { messageId: sent.message_id };
-      } catch (e) {
-        const retryThread = await recoverThread(chatId, opts.threadId, e);
-        if (retryThread === NO_RECOVERY) throw e;
-        const sent = await upload(retryThread);
-        return { messageId: sent.message_id };
-      }
+      const sent = await api.sendDocument(chatId, opts.path, { filename: opts.filename, caption: opts.caption });
+      return { messageId: sent.message_id };
     },
 
-    async sendButtons(chatId, prompt, choices, threadId) {
-      const sent = await api.sendMessage(chatId, prompt, { reply_markup: inlineKeyboard(choices), message_thread_id: threadId });
+    async sendButtons(chatId, prompt, choices) {
+      const sent = await api.sendMessage(chatId, prompt, { reply_markup: inlineKeyboard(choices) });
       return { messageId: sent.message_id };
     },
 
@@ -419,7 +364,19 @@ export function telegramTransport(api: TelegramApi, cfg: Config, log: (m: string
           continue;
         }
         for (const u of ups) {
-          const inbound = toInbound(u);
+          // The organizer group first: it owns its own chat completely (delivery AND routing), so an
+          // update there must not also reach the bridge. Poison-guarded like everything else in this
+          // loop — a throwing handler is logged and the cursor still advances.
+          let ownedByGroup = false;
+          if (onGroupUpdate && u.message) {
+            try {
+              ownedByGroup = await onGroupUpdate(u.message);
+            } catch (e) {
+              log(`group handler failed for update ${u.update_id} (skipping): ${(e as Error).message}`);
+              ownedByGroup = true; // it WAS the group's message; don't hand a half-handled one to the bridge
+            }
+          }
+          const inbound = ownedByGroup ? undefined : toInbound(u);
           if (inbound) {
             try {
               await onInbound(inbound);

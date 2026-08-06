@@ -89,7 +89,7 @@ TELEGRAM_BOT_TOKEN=… npx tsx bin/cotal-telegram.ts --space demo --creds ./tele
 
 Flags: `--server <nats-url>` · `--space <s>` · `--name <peer>` · `--channel <c>` · `--token <file|value>`
 · `--creds <file>` · `--groq-key <file|value>` · `--chat <id>` · `--files-dir <dir>` · `--learn-first-chat`
-· `--topics` · `--no-markdown` (alias `--plain`). The token may also come from `$TELEGRAM_BOT_TOKEN`, the Groq key from
+· `--topics <chat-id>` · `--no-markdown` (alias `--plain`). The token may also come from `$TELEGRAM_BOT_TOKEN`, the Groq key from
 `$GROQ_API_KEY`.
 
 **Markdown formatting (default ON):** agent output is rendered to Telegram so `**bold**`/`*bold*`,
@@ -139,35 +139,46 @@ redelivered by JetStream) so nothing is lost; a channel post is dropped.
 
 
 <a name="topics"></a>
-## Group topics — one thread per agent (`--topics`)
+## The organizer group — one topic per agent (`--topics <chat-id>`)
 
-Purely **organizational**: with `--topics`, an allowlisted **forum supergroup** receives the same stream
-it would anyway, sorted into **one topic per agent** instead of interleaved into one scroll. Nothing about
-*who may talk to whom* changes — the allowlist is still the only thing that authorizes delivery, and a
-topic only decides **where inside a chat** a line lands.
+Purely a **way to organize**: the same stream the endpoint already carries, sorted into **one Telegram
+forum topic per agent** instead of every agent interleaved into one scroll. Nothing about who may talk to
+whom changes.
 
-Your existing 1:1 DM with the bot is unaffected: it isn't a forum, so it keeps receiving **everything,
-unthreaded**. The group is a mirror, not a move — run both at once.
+```
+agent joins the mesh   → its topic is created (before it has said anything)
+agent sends a message  → the message lands in that agent's topic
+you type in a topic    → it goes to that agent — the topic IS the address, no @name needed
+```
 
-**Setup (one-time, and you must do it — a bot can't):** a bot cannot create a supergroup and cannot turn
+Your 1:1 DM with the bot is untouched and keeps receiving everything, so the group **mirrors** rather than
+moves. Same bot, same mesh peer, one long-poll — the group is a second view, not a second bridge.
+
+**Setup (one-time, and it has to be you — a bot can't):** a bot can neither create a supergroup nor turn
 Topics on (`toggleForum` is owner-only). So: create the supergroup, enable **Topics** in its settings, add
-the bot, and promote it to admin with **`can_manage_topics`**. Then allowlist the group (`--chat <group-id>`,
-or `/bind` in it) and start with `--topics`.
+the bot, promote it to admin with **`can_manage_topics`**, then start with `--topics <group-id>`.
+
+Do **not** also pass the group to `--chat`: `--topics` is deliberately separate from the chat allowlist.
+The group is owned end to end by `src/group.ts` — if the bridge knew it too, every line would arrive twice
+(once threaded, once not).
 
 | | |
 | --- | --- |
-| **When a topic is made** | **Lazily**, the first time that agent actually says something — not when it joins the mesh. Every `createForumTopic` posts a service message into the group, and a group is capped at ~20 messages/minute, so creating a topic per idle peer would spend the whole budget announcing agents that may never speak. |
-| **What a topic is keyed on** | The agent **name** (what `@name` addresses, and what survives a respawn) — so a restarted agent returns to its own topic instead of stranding its history in a dead one. |
-| **Talking back** | Just type in the topic. Each topic keeps its **own sticky target**, latched to that agent on first contact, so a plain line inside alice's topic goes to alice with no `@alice`. `@name` / `#channel` / `?role` / `/commands` all still work inside a topic and only re-point **that** topic. |
-| **The General topic** | An ordinary un-threaded chat: broadcasts, `/who`, and anything you type there behave exactly as they do in a DM. (Telegram gives General no thread id at all — `message_thread_id: 1` is rejected — so "General" and "no topic" are the same destination on the wire.) |
+| **When a topic appears** | When the agent **joins the mesh** — the topic list is the agent list, not a log of who happened to speak. Agents already present at startup are seeded from the roster (no join event fires for those). |
+| **What it's keyed on** | The agent **name** — what `@name` addresses, and what survives a respawn, so a restarted agent returns to its own topic instead of stranding its history. |
+| **Who gets one** | Agents. Endpoints (this bridge, dashboards) are skipped — they're observers, and would only add empty topics. |
+| **When an agent leaves** | It **keeps** its topic. History survives and a return lands in the same place. |
+| **The General topic** | Addresses nobody in particular, so anything typed there is ignored with a note. Use the DM for commands. |
 
-**Recovery, because the Bot API is thin here.** There is **no way to list a forum's topics** and **no
-update when one is deleted**, so the `name → thread_id` map is ours: it's persisted atomically to
-`<state>/<space>/telegram.topics.json` on every change, and it **cannot be rebuilt from Telegram** if lost
-(a lost map just means new topics get created). If you delete a topic in the app, the bridge finds out
-when a send fails with `message thread not found` — it then drops the stale id, **recreates the topic, and
-retries**. If the recreate also fails (rate limit, admin right revoked), the line is sent **unthreaded**
-rather than dropped: landing in General beats losing an agent's message.
+**Recovery, because the Bot API is thin here.** There's **no way to list a forum's topics** and **no update
+when one is deleted**, so the `name → thread_id` map is ours: persisted atomically to
+`<state>/<name>.topics.json` and **not rebuildable** from Telegram if lost (losing it just means new topics
+get created). Delete a topic in the app and the bridge finds out only when a send fails with
+`message thread not found` — it drops the stale id, **recreates the topic, and retries**. If the recreate
+fails too (rate limit, admin right revoked), the line goes to **General** rather than being dropped.
+
+Known gaps in the group (all work as always in the DM): slash-commands, voice transcription, and file
+attachments are DM-only for now — the group handles plain text in both directions.
 
 ## Test
 
@@ -176,5 +187,5 @@ npm run check:telegram   # hermetic: pure routing/format/allowlist + a fake tran
 npm run typecheck
 ```
 
-State (peer id pin, getUpdates offset, chat allowlist, per-agent topic map, and inbound `files/`) lives under
+State (peer id pin, getUpdates offset, chat allowlist, the per-agent topic map, and inbound `files/`) lives under
 `$COTAL_TG_HOME` or `~/.cotal-telegram/<space>/` (the downloads dir is overridable with `--files-dir`).
