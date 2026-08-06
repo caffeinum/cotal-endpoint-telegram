@@ -11,6 +11,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { EndpointConfig } from "@cotal-ai/endpoint-core";
+import { agentFromWakeCommand } from "./wake.js";
 
 /** The full Telegram endpoint config: the channel-agnostic {@link EndpointConfig} plus Telegram bits. */
 export interface Config extends EndpointConfig {
@@ -29,8 +30,10 @@ export interface Config extends EndpointConfig {
    *  endpoint JOINS each at startup, so a channel listed here is one whose traffic actually arrives.
    *  Absent → just {@link EndpointConfig.channel}, the one the bridge already subscribes to. */
   mirrorChannels: string[];
-  /** After a successful `/wake`, point the chat at this agent (`--wake-agent <name>`), so the next line
-   *  you type goes to the agent you just woke. Absent → `/wake` leaves the sticky target alone. */
+  /** After a successful `/wake`, point the chat at this agent, so the next line you type goes to the
+   *  agent you just woke. Defaults to the agent named in {@link EndpointConfig.wakeCommand} (`paw global
+   *  …` → `global`), since the deployment already says what it wakes; `--wake-agent <name>` overrides.
+   *  Absent (no wake command at all) → `/wake` leaves the target alone. */
   wakeAgent?: string;
 }
 
@@ -147,7 +150,8 @@ export function buildConfig(raw: RawArgs): Config {
     markdown: raw.markdown ?? true,
     topicsChat: raw.topics === undefined ? undefined : topicsChatOrThrow(raw.topics),
     mirrorChannels: parseChannelList(raw.channels, raw.channel ?? DEFAULT_CHANNEL),
-    wakeAgent: raw.wakeAgent ?? process.env.COTAL_TG_WAKE_AGENT,
+    wakeAgent:
+      raw.wakeAgent ?? process.env.COTAL_TG_WAKE_AGENT ?? agentFromWakeCommand(raw.wakeCommand ?? process.env.COTAL_TG_WAKE_COMMAND),
     filesDir: raw.filesDir,
     helpFooter: raw.helpFooter ?? process.env.COTAL_TG_HELP_FOOTER,
     wakeCommand: raw.wakeCommand ?? process.env.COTAL_TG_WAKE_COMMAND,

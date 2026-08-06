@@ -14,6 +14,33 @@
  * global". So we watch the roster until it shows up.
  */
 
+/**
+ * The agent a wake command brings up, read off the command itself: `paw global --space paw` → `global`.
+ * The first bare word after the program name, skipping flags and their values.
+ *
+ * WHY infer instead of asking for it: the deployment already states which agent it wakes — repeating it
+ * in a second setting is a thing to keep in sync and get wrong. An explicit `--wake-agent` still wins
+ * when the command doesn't look like this.
+ *
+ * SAFE when it guesses wrong: the name is only ever used to wait for that agent on the roster, so a bad
+ * guess simply never resolves and the chat's target is left exactly as it was. It can't switch you to
+ * something that isn't there. Pure.
+ */
+export function agentFromWakeCommand(command: string | undefined): string | undefined {
+  if (!command) return undefined;
+  const words = command.trim().split(/\s+/);
+  for (let i = 1; i < words.length; i++) {
+    const w = words[i];
+    if (w.startsWith("-")) {
+      // A flag; skip its value too unless it was written --flag=value.
+      if (!w.includes("=")) i++;
+      continue;
+    }
+    return w;
+  }
+  return undefined;
+}
+
 /** The roster shape this module needs — structurally, so a test can pass a plain object. */
 export interface RosterSource {
   getRoster(): { card: { name: string }; status: string }[];

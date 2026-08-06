@@ -117,3 +117,29 @@ test("a NON-wake message never triggers a switch", async () => {
   assert.deepEqual(got.map((i) => i.text), ["/who"]);
   assert.equal(asked, 0);
 });
+
+// ── the agent is read off the wake command, not configured twice ──────────────────────────────────
+import { agentFromWakeCommand } from "../src/wake.js";
+import { buildConfig } from "../src/config.js";
+
+test("agentFromWakeCommand reads the agent out of the configured command", () => {
+  assert.equal(agentFromWakeCommand("paw global --space paw"), "global");
+  assert.equal(agentFromWakeCommand("paw start global"), "start"); // first bare word wins; --wake-agent overrides
+  assert.equal(agentFromWakeCommand("  paw   global  "), "global");
+  assert.equal(agentFromWakeCommand("paw --space paw global"), "global", "a flag and its value are skipped");
+  assert.equal(agentFromWakeCommand("paw --space=paw global"), "global", "--flag=value carries its own value");
+});
+
+test("agentFromWakeCommand returns undefined rather than guessing when there's nothing to read", () => {
+  assert.equal(agentFromWakeCommand(undefined), undefined);
+  assert.equal(agentFromWakeCommand(""), undefined);
+  assert.equal(agentFromWakeCommand("paw"), undefined, "a program name alone names no agent");
+  assert.equal(agentFromWakeCommand("paw --space paw"), undefined, "flags only → nothing to infer");
+});
+
+test("buildConfig infers wakeAgent from the wake command, and --wake-agent overrides it", () => {
+  const base = { token: "1:x", space: "t" };
+  assert.equal(buildConfig({ ...base, wakeCommand: "paw global --space paw" }).wakeAgent, "global");
+  assert.equal(buildConfig({ ...base, wakeCommand: "paw global", wakeAgent: "other" }).wakeAgent, "other");
+  assert.equal(buildConfig({ ...base }).wakeAgent, undefined, "no wake command → no switch");
+});

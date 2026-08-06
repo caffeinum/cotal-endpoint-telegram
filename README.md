@@ -138,9 +138,11 @@ inbound is learned into `<state>/<space>/chats.json`). Until a chat is bound, a 
 redelivered by JetStream) so nothing is lost; a channel post is dropped.
 
 
-**`/wake` points the chat at what it woke.** With `--wake-agent <name>` (or `$COTAL_TG_WAKE_AGENT`), a
-successful `/wake` is followed by the `/to <name>` you'd have typed next, so the agent you just brought up
-is the one your next line reaches. It **waits for that agent to actually register on the mesh** first —
+**`/wake` points the chat at what it woke.** A successful `/wake` is followed by the `/to <agent>` you'd
+have typed next, so the agent you just brought up is the one your next line reaches. The agent is read off
+the wake command itself (`paw global --space paw` → `global`) — the deployment already says what it wakes,
+so there's nothing extra to configure; `--wake-agent <name>` overrides it when the command doesn't look
+like that. It **waits for that agent to actually register on the mesh** first —
 the wake command returning means the process started, not that it joined, so switching immediately would
 race presence and fail with "no peer". If it never shows up within ~20s the chat's target is left alone.
 The switch is issued as a real `/to`, through the same command path a typed one takes, so it latches and
