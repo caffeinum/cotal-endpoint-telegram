@@ -13,6 +13,7 @@ import { SendError, type ButtonChoice, type CallbackQuery, type CommandDesc, typ
 import { readOffset, writeOffset } from "@cotal-ai/endpoint-core";
 import type { Config } from "./config.js";
 import { telegramFormatter } from "./format.js";
+import { isMissingThread, TopicRegistry } from "./topics.js";
 
 export interface TgUser {
   id: number;
@@ -62,6 +63,12 @@ export interface TgMessage {
   document?: TgDocument;
   /** A photo — an array of sizes (largest chosen for download). */
   photo?: TgPhotoSize[];
+  /** The forum topic (or non-forum reply thread) this message belongs to. NOT proof of a topic on its
+   *  own — a non-forum chat's reply threads populate it too; only `is_topic_message` distinguishes. */
+  message_thread_id?: number;
+  /** True ONLY for a message in a real forum topic. Absent for the General topic (which has no thread
+   *  id at all) and for a non-forum reply thread. */
+  is_topic_message?: boolean;
 }
 
 /** A tap on an inline-keyboard button. `message` is the button message (present for a fresh tap, absent
@@ -103,7 +110,7 @@ export interface TelegramApi {
   /** Long-poll. `signal` lets the caller abort the in-flight request (so stop() doesn't block on
    *  the ~40s HTTP timeout of a parked long-poll). */
   getUpdates(offset: number, timeoutSec: number, signal?: AbortSignal): Promise<TgUpdate[]>;
-  sendMessage(chatId: number, text: string, opts?: { reply_to_message_id?: number; parse_mode?: "HTML" | "MarkdownV2" | "Markdown"; reply_markup?: TgInlineKeyboard }): Promise<{ message_id: number }>;
+  sendMessage(chatId: number, text: string, opts?: { reply_to_message_id?: number; parse_mode?: "HTML" | "MarkdownV2" | "Markdown"; reply_markup?: TgInlineKeyboard; message_thread_id?: number }): Promise<{ message_id: number }>;
   /** Edit an already-sent message's text in place (Bot API `editMessageText`). Omitting `reply_markup`
    *  drops the message's inline keyboard (the tap already happened). */
   editMessageText(chatId: number, messageId: number, text: string, opts?: { parse_mode?: "HTML" | "MarkdownV2" | "Markdown"; reply_markup?: TgInlineKeyboard }): Promise<{ message_id: number }>;
@@ -115,7 +122,13 @@ export interface TelegramApi {
   setMessageReaction(chatId: number, messageId: number, emoji: string | undefined): Promise<void>;
   /** Upload a LOCAL file (read from `path` on disk) to a chat via Telegram's `sendDocument` (multipart).
    *  `filename` labels the upload (defaults to the path basename); `caption` is optional. */
-  sendDocument(chatId: number, path: string, opts?: { filename?: string; caption?: string }): Promise<{ message_id: number }>;
+  sendDocument(chatId: number, path: string, opts?: { filename?: string; caption?: string; message_thread_id?: number }): Promise<{ message_id: number }>;
+  /** Is this chat a forum (topics enabled)? `getChat().is_forum` — the ONLY way to know, and the gate on
+   *  every topic operation. */
+  isForum(chatId: number): Promise<boolean>;
+  /** Create a forum topic and return its `message_thread_id`. Requires the bot to be an admin with
+   *  `can_manage_topics` in an ALREADY-forum supergroup (a bot can enable neither). */
+  createForumTopic(chatId: number, name: string, iconColor?: number): Promise<{ message_thread_id: number }>;
   /** Resolve a `file_id` to a `file_path` (Telegram's getFile). The path feeds `downloadFile`. */
   getFile(fileId: string): Promise<{ file_id: string; file_path: string }>;
   /** Download a file's raw bytes from `https://api.telegram.org/file/bot<token>/<file_path>`. */
@@ -239,6 +252,39 @@ const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
  * POISON-GUARDED (a throwing handler is logged + skipped, the offset still advances).
  */
 export function telegramTransport(api: TelegramApi, cfg: Config, log: (m: string) => void = () => {}): Transport {
+  // Per-agent forum topics, only when the operator opted in. Absent → `threadFor` is not exposed at all
+  // and endpoint-core takes its unthreaded path, byte-for-byte as before.
+  const topics = cfg.topics ? new TopicRegistry(api, cfg, log) : undefined;
+
+  /** Sentinel for "this failure is not a missing topic — rethrow it untouched". Distinct from
+   *  `undefined`, which is a REAL outcome here: retry the send with no topic at all. */
+  const NO_RECOVERY = Symbol("no-recovery");
+
+  /**
+   * A topic deleted in the Telegram app is invisible to a bot — there's no deletion update and no way to
+   * probe a thread id — so a failed send is the ONLY signal we ever get. On `message thread not found`:
+   * drop the stale mapping, recreate the agent's topic, and report the id to retry in.
+   *
+   * If the recreate ALSO fails (rate limit, admin right revoked, forum turned off), fall back to
+   * `undefined` = send unthreaded. Losing the agent's message would be a strictly worse outcome than
+   * delivering it to the group's General topic.
+   */
+  async function recoverThread(
+    chatId: number,
+    threadId: number | undefined,
+    e: unknown,
+  ): Promise<number | undefined | typeof NO_RECOVERY> {
+    if (!topics || threadId === undefined || !isMissingThread(e)) return NO_RECOVERY;
+    const agent = topics.agentOf(chatId, threadId);
+    topics.forget(chatId, threadId);
+    if (!agent) return undefined; // a thread we never created — just retry unthreaded
+    try {
+      return await topics.ensure(chatId, agent);
+    } catch (e2) {
+      log(`couldn't recreate topic for "${agent}" (sending unthreaded): ${(e2 as Error).message}`);
+      return undefined;
+    }
+  }
   /** Map one Telegram update to a channel-agnostic Inbound (undefined for a message-less update). */
   function toInbound(u: TgUpdate): Inbound | undefined {
     const m = u.message;
@@ -278,6 +324,12 @@ export function telegramTransport(api: TelegramApi, cfg: Config, log: (m: string
       replyToId: m.reply_to_message?.message_id,
       audio,
       file,
+      // ONLY a real forum topic sets threadId. `message_thread_id` alone is not enough: a non-forum
+      // chat's reply threads populate it too, and treating those as topics would fragment one chat's
+      // sticky target across every reply chain. The General topic has neither field — correctly absent,
+      // since "General" and "no topic" are the same destination on the wire. The key is OMITTED (not set
+      // to undefined) so a non-topic Inbound keeps its exact pre-threads shape.
+      ...(m.is_topic_message === true && m.message_thread_id !== undefined ? { threadId: m.message_thread_id } : {}),
     };
   }
 
@@ -297,12 +349,26 @@ export function telegramTransport(api: TelegramApi, cfg: Config, log: (m: string
     },
 
     async send(chatId, text, opts) {
-      const sent = await api.sendMessage(chatId, text, {
-        reply_to_message_id: opts?.replyTo,
-        parse_mode: opts?.mode as "HTML" | undefined,
-      });
-      return { messageId: sent.message_id };
+      const send = (threadId: number | undefined) =>
+        api.sendMessage(chatId, text, {
+          reply_to_message_id: opts?.replyTo,
+          parse_mode: opts?.mode as "HTML" | undefined,
+          message_thread_id: threadId,
+        });
+      try {
+        const sent = await send(opts?.threadId);
+        return { messageId: sent.message_id };
+      } catch (e) {
+        const retryThread = await recoverThread(chatId, opts?.threadId, e);
+        if (retryThread === NO_RECOVERY) throw e;
+        const sent = await send(retryThread);
+        return { messageId: sent.message_id };
+      }
     },
+
+    // Per-agent topics: "which topic of this chat does this sender's line belong in". Only present when
+    // the operator opted in — its ABSENCE is what keeps the unthreaded path unchanged.
+    threadFor: topics ? (chatId, sender) => topics.threadFor(chatId, sender) : undefined,
 
     async setReaction(chatId, messageId, reaction) {
       await api.setMessageReaction(chatId, messageId, reaction);
@@ -313,12 +379,21 @@ export function telegramTransport(api: TelegramApi, cfg: Config, log: (m: string
     },
 
     async sendFile(chatId, opts) {
-      const sent = await api.sendDocument(chatId, opts.path, { filename: opts.filename, caption: opts.caption });
-      return { messageId: sent.message_id };
+      const upload = (threadId: number | undefined) =>
+        api.sendDocument(chatId, opts.path, { filename: opts.filename, caption: opts.caption, message_thread_id: threadId });
+      try {
+        const sent = await upload(opts.threadId);
+        return { messageId: sent.message_id };
+      } catch (e) {
+        const retryThread = await recoverThread(chatId, opts.threadId, e);
+        if (retryThread === NO_RECOVERY) throw e;
+        const sent = await upload(retryThread);
+        return { messageId: sent.message_id };
+      }
     },
 
-    async sendButtons(chatId, prompt, choices) {
-      const sent = await api.sendMessage(chatId, prompt, { reply_markup: inlineKeyboard(choices) });
+    async sendButtons(chatId, prompt, choices, threadId) {
+      const sent = await api.sendMessage(chatId, prompt, { reply_markup: inlineKeyboard(choices), message_thread_id: threadId });
       return { messageId: sent.message_id };
     },
 
@@ -433,6 +508,9 @@ export function httpApi(token: string): TelegramApi {
       return call<{ message_id: number }>("sendMessage", {
         chat_id: chatId,
         text,
+        // The forum topic to post into. OMITTED when undefined — Telegram rejects `message_thread_id: 1`
+        // (the General topic), and General/no-topic is expressed by the field's ABSENCE, not by a value.
+        message_thread_id: opts?.message_thread_id,
         reply_to_message_id: opts?.reply_to_message_id,
         // parse_mode is omitted entirely when undefined (plain text) — a null/"" would be a bad request.
         parse_mode: opts?.parse_mode,
@@ -477,6 +555,7 @@ export function httpApi(token: string): TelegramApi {
       }
       const form = new FormData();
       form.append("chat_id", String(chatId));
+      if (opts?.message_thread_id !== undefined) form.append("message_thread_id", String(opts.message_thread_id));
       if (opts?.caption) form.append("caption", opts.caption);
       form.append("document", new Blob([bytes]), opts?.filename || basename(path));
       const ctl = new AbortController();
@@ -493,6 +572,17 @@ export function httpApi(token: string): TelegramApi {
       } finally {
         clearTimeout(timer);
       }
+    },
+    async isForum(chatId) {
+      const chat = await call<{ is_forum?: boolean }>("getChat", { chat_id: chatId });
+      return chat.is_forum === true;
+    },
+    async createForumTopic(chatId, name, iconColor) {
+      return call<{ message_thread_id: number }>("createForumTopic", {
+        chat_id: chatId,
+        name,
+        icon_color: iconColor,
+      });
     },
     async getFile(fileId) {
       const f = await call<{ file_id: string; file_path?: string }>("getFile", { file_id: fileId });

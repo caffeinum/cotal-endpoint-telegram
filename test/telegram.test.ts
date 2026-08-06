@@ -60,16 +60,24 @@ test("groqFilename: Telegram .oga → .ogg; accepted extensions kept; missing �
 // ── a fake low-level Telegram Bot API ──────────────────────────────────────────────────────────────
 class FakeApi implements TelegramApi {
   updates: TgUpdate[][] = [];
-  sends: { chatId: number; text: string; parse_mode?: string; reply_to?: number; reply_markup?: TgInlineKeyboard }[] = [];
+  sends: { chatId: number; text: string; parse_mode?: string; reply_to?: number; reply_markup?: TgInlineKeyboard; thread?: number }[] = [];
   edits: { chatId: number; messageId: number; text: string; parse_mode?: string; reply_markup?: TgInlineKeyboard }[] = [];
   answers: { callbackId: string; text?: string }[] = [];
   reactions: { chatId: number; messageId: number; emoji: string | undefined }[] = [];
   commandsSet: { commands: { command: string; description: string }[]; scope?: BotCommandScope }[] = [];
   downloads: string[] = [];
-  documents: { chatId: number; path: string; filename?: string; caption?: string }[] = [];
+  documents: { chatId: number; path: string; filename?: string; caption?: string; thread?: number }[] = [];
+  /** Chats the fake reports as forums (`getChat().is_forum`) + every createForumTopic call. */
+  forums = new Set<number>();
+  topicsCreated: { chatId: number; name: string; iconColor?: number }[] = [];
+  nextThreadId = 100;
+  createTopicThrows?: () => void;
+  isForumThrows?: () => void;
   deleteWebhookArgs: (boolean | undefined)[] = [];
   nextId = 1000;
   sendThrows?: (chatId: number, text: string, parseMode?: string) => void;
+  /** Simulate a send into a DELETED topic (Telegram's `message thread not found`). */
+  threadSendThrows?: (chatId: number, threadId?: number) => void;
   async getMe() { return { id: 1, username: "candlestick_dev_bot" }; }
   async getUpdates() {
     const batch = this.updates.shift();
@@ -77,9 +85,12 @@ class FakeApi implements TelegramApi {
     await new Promise((r) => setTimeout(r, 10));
     return [];
   }
-  async sendMessage(chatId: number, text: string, opts?: { reply_to_message_id?: number; parse_mode?: string; reply_markup?: TgInlineKeyboard }) {
+  async sendMessage(chatId: number, text: string, opts?: { reply_to_message_id?: number; parse_mode?: string; reply_markup?: TgInlineKeyboard; message_thread_id?: number }) {
     this.sendThrows?.(chatId, text, opts?.parse_mode);
-    this.sends.push({ chatId, text, parse_mode: opts?.parse_mode, reply_to: opts?.reply_to_message_id, reply_markup: opts?.reply_markup });
+    this.threadSendThrows?.(chatId, opts?.message_thread_id);
+    const rec: { chatId: number; text: string; parse_mode?: string; reply_to?: number; reply_markup?: TgInlineKeyboard; thread?: number } = { chatId, text, parse_mode: opts?.parse_mode, reply_to: opts?.reply_to_message_id, reply_markup: opts?.reply_markup };
+    if (opts?.message_thread_id !== undefined) rec.thread = opts.message_thread_id;
+    this.sends.push(rec);
     return { message_id: this.nextId++ };
   }
   async editMessageText(chatId: number, messageId: number, text: string, opts?: { parse_mode?: string; reply_markup?: TgInlineKeyboard }) {
@@ -92,9 +103,21 @@ class FakeApi implements TelegramApi {
   async setMessageReaction(chatId: number, messageId: number, emoji: string | undefined) {
     this.reactions.push({ chatId, messageId, emoji });
   }
-  async sendDocument(chatId: number, path: string, opts?: { filename?: string; caption?: string }) {
-    this.documents.push({ chatId, path, filename: opts?.filename, caption: opts?.caption });
+  async sendDocument(chatId: number, path: string, opts?: { filename?: string; caption?: string; message_thread_id?: number }) {
+    this.threadSendThrows?.(chatId, opts?.message_thread_id);
+    const rec: { chatId: number; path: string; filename?: string; caption?: string; thread?: number } = { chatId, path, filename: opts?.filename, caption: opts?.caption };
+    if (opts?.message_thread_id !== undefined) rec.thread = opts.message_thread_id;
+    this.documents.push(rec);
     return { message_id: this.nextId++ };
+  }
+  async isForum(chatId: number) {
+    this.isForumThrows?.();
+    return this.forums.has(chatId);
+  }
+  async createForumTopic(chatId: number, name: string, iconColor?: number) {
+    this.createTopicThrows?.();
+    this.topicsCreated.push({ chatId, name, iconColor });
+    return { message_thread_id: this.nextThreadId++ };
   }
   async getFile(fileId: string) { return { file_id: fileId, file_path: `voice/${fileId}.oga` }; }
   async downloadFile(filePath: string) { this.downloads.push(filePath); return new Uint8Array([0x4f, 0x67, 0x67]); }
@@ -104,7 +127,7 @@ class FakeApi implements TelegramApi {
 }
 
 function cfgIn(dir: string, over: Partial<Config> = {}): Config {
-  return { space: "t", server: "nats://127.0.0.1:4222", name: "telegram", channel: "general", token: "x:y", stateRoot: dir, seedChats: [42], learnFirstChat: false, markdown: true, ...over };
+  return { space: "t", server: "nats://127.0.0.1:4222", name: "telegram", channel: "general", token: "x:y", stateRoot: dir, seedChats: [42], learnFirstChat: false, markdown: true, topics: false, ...over };
 }
 const tick = () => new Promise((r) => setTimeout(r, 30));
 
@@ -474,4 +497,156 @@ test("groqTranscriber: a non-2xx response throws with the status + body", async 
   } finally {
     globalThis.fetch = realFetch;
   }
+});
+
+// ── forum topics: one topic per agent ─────────────────────────────────────────────────────────────
+// The Bot API gives no way to LIST topics, so the name → thread_id map is ours to persist and ours to
+// repair. These cover the whole lifecycle: gate, create-once, reuse, persist, recover, degrade.
+
+/** Drive `threadFor` on a transport built over `api` — the seam endpoint-core calls per outbound line. */
+function threadForOf(api: FakeApi, cfg: Config) {
+  const tp = telegramTransport(api, cfg);
+  assert.ok(tp.threadFor, "topics mode must expose the threadFor seam");
+  return (chatId: number, name: string) => tp.threadFor!(chatId, { name, id: "id-" + name });
+}
+
+test("--topics off: no threadFor seam at all (endpoint-core keeps its unthreaded path)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "tg-"));
+  const api = new FakeApi();
+  api.forums.add(-100777);
+  assert.equal(telegramTransport(api, cfgIn(dir)).threadFor, undefined);
+});
+
+test("a NON-forum chat gets no topic — the operator's 1:1 DM keeps the whole stream unthreaded", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "tg-"));
+  const api = new FakeApi(); // 42 is not in api.forums
+  const threadFor = threadForOf(api, cfgIn(dir, { topics: true }));
+  assert.equal(await threadFor(42, "alice"), undefined);
+  assert.deepEqual(api.topicsCreated, [], "no topic is ever created in a non-forum chat");
+});
+
+test("a topic is created once per agent, then reused (and getChat is cached)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "tg-"));
+  const api = new FakeApi();
+  api.forums.add(-100777);
+  let forumChecks = 0;
+  api.isForumThrows = () => { forumChecks++; };
+  const threadFor = threadForOf(api, cfgIn(dir, { topics: true }));
+  assert.equal(await threadFor(-100777, "alice"), 100);
+  assert.equal(await threadFor(-100777, "bob"), 101);
+  assert.equal(await threadFor(-100777, "alice"), 100, "alice's second line reuses her topic");
+  assert.deepEqual(api.topicsCreated.map((t) => t.name), ["alice", "bob"]);
+  assert.equal(forumChecks, 1, "is_forum is resolved once per chat, not per message");
+});
+
+test("concurrent first lines from ONE agent create ONE topic (no orphan)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "tg-"));
+  const api = new FakeApi();
+  api.forums.add(-100777);
+  const threadFor = threadForOf(api, cfgIn(dir, { topics: true }));
+  const [a, b, c] = await Promise.all([
+    threadFor(-100777, "alice"),
+    threadFor(-100777, "alice"),
+    threadFor(-100777, "alice"),
+  ]);
+  assert.deepEqual([a, b, c], [100, 100, 100]);
+  assert.equal(api.topicsCreated.length, 1, "a raced create would orphan a topic no API can find again");
+});
+
+test("the map PERSISTS — a restart reuses the existing topics instead of creating duplicates", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "tg-"));
+  const cfg = cfgIn(dir, { topics: true });
+  const api = new FakeApi();
+  api.forums.add(-100777);
+  assert.equal(await threadForOf(api, cfg)(-100777, "alice"), 100);
+  // A fresh transport = a fresh registry, reading the file back off disk.
+  const api2 = new FakeApi();
+  api2.forums.add(-100777);
+  assert.equal(await threadForOf(api2, cfg)(-100777, "alice"), 100);
+  assert.deepEqual(api2.topicsCreated, [], "the persisted id is reused — no second topic for alice");
+});
+
+test("a topic deleted in the app is recreated on the next send (the only signal is the failed send)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "tg-"));
+  const cfg = cfgIn(dir, { topics: true });
+  const api = new FakeApi();
+  api.forums.add(-100777);
+  const tp = telegramTransport(api, cfg);
+  const threadId = await tp.threadFor!(-100777, { name: "alice", id: "id-alice" });
+  assert.equal(threadId, 100);
+  // Telegram now rejects thread 100 — the topic was deleted in the app, which emits NO update.
+  api.threadSendThrows = (_c, t) => {
+    if (t === 100) throw new TelegramApiError("telegram sendMessage failed: Bad Request: message thread not found", 400, true);
+  };
+  const sent = await tp.send(-100777, "alice: hello again", { threadId });
+  assert.ok(sent.messageId, "the message still lands");
+  assert.deepEqual(api.topicsCreated.map((t) => t.name), ["alice", "alice"], "alice's topic was recreated");
+  assert.equal(api.sends.at(-1)!.thread, 101, "the retry went into the NEW topic");
+});
+
+test("if the topic can't be recreated, the line is sent UNTHREADED rather than lost", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "tg-"));
+  const cfg = cfgIn(dir, { topics: true });
+  const api = new FakeApi();
+  api.forums.add(-100777);
+  const tp = telegramTransport(api, cfg);
+  const threadId = await tp.threadFor!(-100777, { name: "alice", id: "id-alice" });
+  api.threadSendThrows = (_c, t) => {
+    if (t === 100) throw new TelegramApiError("telegram sendMessage failed: Bad Request: message thread not found", 400, true);
+  };
+  api.createTopicThrows = () => {
+    throw new TelegramApiError("telegram createForumTopic failed: Too Many Requests", 429, false);
+  };
+  const sent = await tp.send(-100777, "alice: important", { threadId });
+  assert.ok(sent.messageId);
+  assert.equal(api.sends.at(-1)!.thread, undefined, "delivered to General — a dropped message is worse");
+  assert.equal(api.sends.at(-1)!.text, "alice: important");
+});
+
+test("a NON-thread send failure is rethrown untouched (no bogus topic recovery)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "tg-"));
+  const cfg = cfgIn(dir, { topics: true });
+  const api = new FakeApi();
+  api.forums.add(-100777);
+  const tp = telegramTransport(api, cfg);
+  const threadId = await tp.threadFor!(-100777, { name: "alice", id: "id-alice" });
+  api.threadSendThrows = () => {
+    throw new TelegramApiError("telegram sendMessage failed: Bad Request: chat not found", 400, true);
+  };
+  await assert.rejects(() => tp.send(-100777, "x", { threadId }), /chat not found/);
+  assert.deepEqual(api.topicsCreated.map((t) => t.name), ["alice"], "an unrelated 400 must not recreate a topic");
+});
+
+test("outbound file uploads into the sender's topic", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "tg-"));
+  const cfg = cfgIn(dir, { topics: true });
+  const api = new FakeApi();
+  api.forums.add(-100777);
+  const tp = telegramTransport(api, cfg);
+  const threadId = await tp.threadFor!(-100777, { name: "alice", id: "id-alice" });
+  await tp.sendFile!(-100777, { path: "/tmp/out.pdf", caption: "alice: report", threadId });
+  assert.equal(api.documents.at(-1)!.thread, 100);
+});
+
+// ── inbound: which messages count as "in a topic" ─────────────────────────────────────────────────
+test("inbound in a forum topic carries threadId; General and a non-forum reply thread do NOT", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "tg-"));
+  const api = new FakeApi();
+  api.updates.push([
+    // a real forum topic
+    { update_id: 1, message: { message_id: 1, chat: { id: -100777, type: "supergroup" }, text: "in topic", message_thread_id: 100, is_topic_message: true } as TgMessage },
+    // the General topic: no thread id, no flag
+    { update_id: 2, message: { message_id: 2, chat: { id: -100777, type: "supergroup" }, text: "in general" } as TgMessage },
+    // a NON-forum chat's reply thread — message_thread_id is set but is_topic_message is NOT
+    { update_id: 3, message: { message_id: 3, chat: { id: 42, type: "supergroup" }, text: "reply thread", message_thread_id: 55 } as TgMessage },
+  ]);
+  const got: Inbound[] = [];
+  const tp = telegramTransport(api, cfgIn(dir, { topics: true }));
+  const ctl = new AbortController();
+  const loop = tp.run(async (i) => { got.push(i); }, ctl.signal);
+  await tick();
+  ctl.abort();
+  await loop;
+  assert.deepEqual(got.map((i) => i.threadId), [100, undefined, undefined]);
+  assert.ok(!("threadId" in got[1]), "General keeps the exact pre-threads Inbound shape");
 });

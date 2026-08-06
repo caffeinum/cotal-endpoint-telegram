@@ -21,6 +21,10 @@ export interface Config extends EndpointConfig {
    *  disables it (raw text, no parse_mode). A formatted message Telegram rejects with a 400 is auto-
    *  retried as plain text, so it can never be lost. */
   markdown: boolean;
+  /** Organize an allowlisted FORUM supergroup into one topic per agent (`--topics`). Off by default: it
+   *  only affects chats that are already forums, but creating topics is a visible, irreversible-ish
+   *  change to someone's group, so the operator opts in. */
+  topics: boolean;
 }
 
 const DEFAULT_SERVER = "nats://127.0.0.1:4222"; // core's DEFAULT_SERVER (kept literal so config has no core-runtime dep)
@@ -76,6 +80,8 @@ export interface RawArgs {
   wakeCommand?: string;
   /** Seconds `/wake` waits for it (`--wake-timeout`); absent → endpoint-core's default. */
   wakeTimeout?: string;
+  /** Set by `--topics`: one forum topic per agent in any allowlisted forum supergroup. */
+  topics?: boolean;
 }
 
 export function parseArgs(argv: string[]): RawArgs {
@@ -102,6 +108,7 @@ export function parseArgs(argv: string[]): RawArgs {
     else if (a === "--wake-command") out.wakeCommand = val(a, ++i);
     else if (a === "--wake-timeout") out.wakeTimeout = val(a, ++i);
     else if (a === "--learn-first-chat") out.learnFirstChat = true;
+    else if (a === "--topics") out.topics = true;
     else if (a === "--no-markdown" || a === "--plain") out.markdown = false;
     else throw new Error(`cotal-telegram: unknown flag "${a}"`);
   }
@@ -124,6 +131,7 @@ export function buildConfig(raw: RawArgs): Config {
     seedChats,
     learnFirstChat: raw.learnFirstChat ?? false,
     markdown: raw.markdown ?? true,
+    topics: raw.topics ?? false,
     filesDir: raw.filesDir,
     helpFooter: raw.helpFooter ?? process.env.COTAL_TG_HELP_FOOTER,
     wakeCommand: raw.wakeCommand ?? process.env.COTAL_TG_WAKE_COMMAND,
