@@ -72,6 +72,10 @@ export interface RawArgs {
   filesDir?: string;
   /** Free-text line appended to the bottom of /help (`--help-footer`, else $COTAL_TG_HELP_FOOTER). */
   helpFooter?: string;
+  /** Shell command `/wake` runs (`--wake-command`, else $COTAL_TG_WAKE_COMMAND) — e.g. `paw start global`. */
+  wakeCommand?: string;
+  /** Seconds `/wake` waits for it (`--wake-timeout`); absent → endpoint-core's default. */
+  wakeTimeout?: string;
 }
 
 export function parseArgs(argv: string[]): RawArgs {
@@ -95,6 +99,8 @@ export function parseArgs(argv: string[]): RawArgs {
     else if (a === "--chat") out.chat = val(a, ++i);
     else if (a === "--files-dir") out.filesDir = val(a, ++i);
     else if (a === "--help-footer") out.helpFooter = val(a, ++i);
+    else if (a === "--wake-command") out.wakeCommand = val(a, ++i);
+    else if (a === "--wake-timeout") out.wakeTimeout = val(a, ++i);
     else if (a === "--learn-first-chat") out.learnFirstChat = true;
     else if (a === "--no-markdown" || a === "--plain") out.markdown = false;
     else throw new Error(`cotal-telegram: unknown flag "${a}"`);
@@ -120,7 +126,17 @@ export function buildConfig(raw: RawArgs): Config {
     markdown: raw.markdown ?? true,
     filesDir: raw.filesDir,
     helpFooter: raw.helpFooter ?? process.env.COTAL_TG_HELP_FOOTER,
+    wakeCommand: raw.wakeCommand ?? process.env.COTAL_TG_WAKE_COMMAND,
+    wakeTimeoutSec: raw.wakeTimeout === undefined ? undefined : wakeSecsOrThrow(raw.wakeTimeout),
   };
+}
+
+/** Fail loud rather than falling back to the default — a typo'd --wake-timeout that silently does
+ *  nothing is the kind of thing you re-pass three times before suspecting the flag. */
+function wakeSecsOrThrow(s: string): number {
+  const n = Number(s);
+  if (!Number.isFinite(n) || n <= 0) throw new Error(`cotal-telegram: --wake-timeout expects seconds, got "${s}"`);
+  return n;
 }
 
 function numOrThrow(s: string): number {
