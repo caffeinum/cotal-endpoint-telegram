@@ -1,0 +1,19 @@
+pnpm-lock.yaml
+  s_ec71f3b9317af4::t_e80dd90e0e0210 16,33-34,267
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.21",
+  "base_commit_sha": "da02c9ce56104a567dba11e980c53b712a2b7ae0",
+  "prompts": {},
+  "sessions": {
+    "s_ec71f3b9317af4": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "763016c3-c79a-45dd-aaa0-382a95fc6d7b",
+        "model": "unknown"
+      },
+      "human_author": "Aleksey Bykhun <theisease@gmail.com>"
+    }
+  }
+}
