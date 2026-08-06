@@ -1,0 +1,21 @@
+pnpm-lock.yaml
+  s_ed25aaaf9c7e77::t_6db72673000902 1-431
+pnpm-workspace.yaml
+  s_ed25aaaf9c7e77::t_fbbee693ec8fa0 1-2
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.21",
+  "base_commit_sha": "fc8dad4af4d532fbc3c28fc470b9194a5e9ca179",
+  "prompts": {},
+  "sessions": {
+    "s_ed25aaaf9c7e77": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "90dd1251-161e-469a-96db-040d1e555035",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Aleksey Bykhun <theisease@gmail.com>"
+    }
+  }
+}
