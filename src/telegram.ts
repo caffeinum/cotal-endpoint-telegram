@@ -128,6 +128,13 @@ export interface TelegramApi {
   /** Create a forum topic and return its `message_thread_id`. Requires the bot to be an admin with
    *  `can_manage_topics` in an ALREADY-forum supergroup (a bot can enable neither). */
   createForumTopic(chatId: number, name: string, iconColor?: number): Promise<{ message_thread_id: number }>;
+  /** Swap a topic's icon. `icon_color` is IMMUTABLE after creation (editForumTopic has no such param),
+   *  so a custom emoji is the only icon that can ever change — this is what carries agent status.
+   *  An empty `customEmojiId` removes the icon, reverting to the plain colored dot. */
+  editForumTopicIcon(chatId: number, threadId: number, customEmojiId: string): Promise<void>;
+  /** The ONLY custom emoji a bot may use as a topic icon (bots aren't Premium, so the default
+   *  topic-icon pack is the whole allowed set). Emoji → id, resolved at runtime rather than hardcoded. */
+  getForumTopicIconStickers(): Promise<{ emoji?: string; custom_emoji_id: string }[]>;
   /** Resolve a `file_id` to a `file_path` (Telegram's getFile). The path feeds `downloadFile`. */
   getFile(fileId: string): Promise<{ file_id: string; file_path: string }>;
   /** Download a file's raw bytes from `https://api.telegram.org/file/bot<token>/<file_path>`. */
@@ -540,6 +547,18 @@ export function httpApi(token: string): TelegramApi {
         name,
         icon_color: iconColor,
       });
+    },
+    async editForumTopicIcon(chatId, threadId, customEmojiId) {
+      // `name` is omitted deliberately: editForumTopic keeps the current name when it isn't specified,
+      // so the icon can change without ever touching what the topic is called.
+      await call<boolean>("editForumTopic", {
+        chat_id: chatId,
+        message_thread_id: threadId,
+        icon_custom_emoji_id: customEmojiId,
+      });
+    },
+    async getForumTopicIconStickers() {
+      return call<{ emoji?: string; custom_emoji_id: string }[]>("getForumTopicIconStickers");
     },
     async getFile(fileId) {
       const f = await call<{ file_id: string; file_path?: string }>("getFile", { file_id: fileId });

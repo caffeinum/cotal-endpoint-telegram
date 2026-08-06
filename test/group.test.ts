@@ -55,6 +55,16 @@ class FakeApi {
     this.documents.push({ path, caption: opts?.caption, thread: opts?.message_thread_id });
     return { message_id: this.nextMessageId++ };
   }
+  iconEdits: { threadId: number; customEmojiId: string }[] = [];
+  iconEditThrows?: () => void;
+  async editForumTopicIcon(_chatId: number, threadId: number, customEmojiId: string) {
+    this.iconEditThrows?.();
+    this.iconEdits.push({ threadId, customEmojiId });
+  }
+  async getForumTopicIconStickers() {
+    return [{ emoji: "✅", custom_emoji_id: "id-check" }, { emoji: "⚡️", custom_emoji_id: "id-bolt" },
+            { emoji: "👀", custom_emoji_id: "id-eyes" }, { emoji: "☕️", custom_emoji_id: "id-coffee" }];
+  }
   getFileThrows?: () => void;
   async getFile(fileId: string) {
     this.getFileThrows?.();
@@ -79,7 +89,7 @@ class FakeEndpoint extends EventEmitter {
   }
 }
 
-const agent = (name: string): Row => ({ card: { id: "id-" + name, name, kind: "agent" }, status: "idle" });
+const agent = (name: string, status = "idle"): Row => ({ card: { id: "id-" + name, name, kind: "agent" }, status });
 const dm = (from: string, text: string) =>
   ({ from: { id: "id-" + from, name: from }, parts: [{ kind: "text", text }] }) as never;
 const live = { historical: false, kind: "dm" as const };
@@ -457,4 +467,99 @@ test("an agent's [[file:…]] uploads into ITS topic, directive stripped", async
   await tick();
   assert.deepEqual(api.documents, [{ path: "/tmp/out.pdf", caption: "alice: the report", thread: 100 }]);
   assert.deepEqual(api.sends, [], "the directive is uploaded, not echoed as text");
+});
+
+// ── status icons ──────────────────────────────────────────────────────────────────────────────────
+// icon_color is immutable after creation, so a custom emoji is the ONLY icon that can carry status —
+// and a bot may only use Telegram's default topic-icon pack (no traffic lights in it).
+test("a joining agent's topic is stamped with its status icon", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "tg-"));
+  const api = new FakeApi();
+  const ep = new FakeEndpoint();
+  mirrorIn(dir, api, ep).start();
+  await tick();
+  ep.emit("presence", { type: "join", presence: agent("alice", "working") });
+  await tick();
+  assert.deepEqual(api.iconEdits, [{ threadId: 100, customEmojiId: "id-bolt" }], "working → ⚡️");
+});
+
+test("a status CHANGE restamps the icon; an unchanged heartbeat does NOT", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "tg-"));
+  const api = new FakeApi();
+  const ep = new FakeEndpoint();
+  mirrorIn(dir, api, ep).start();
+  await tick();
+  ep.emit("presence", { type: "join", presence: agent("alice", "idle") });
+  await tick();
+  ep.emit("presence", { type: "update", presence: agent("alice", "idle") }); // heartbeat, same status
+  await tick();
+  ep.emit("presence", { type: "update", presence: agent("alice", "working") });
+  await tick();
+  ep.emit("presence", { type: "offline", presence: agent("alice", "offline") });
+  await tick();
+  assert.deepEqual(api.iconEdits.map((e) => e.customEmojiId), ["id-check", "id-bolt", "id-coffee"],
+    "idle → working → offline; the repeated heartbeat is skipped (each edit posts a service message)");
+});
+
+test("the applied icon PERSISTS — a restart doesn't re-stamp what's already correct", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "tg-"));
+  const api = new FakeApi();
+  const ep = new FakeEndpoint();
+  mirrorIn(dir, api, ep).start();
+  await tick();
+  ep.emit("presence", { type: "join", presence: agent("alice", "working") });
+  await tick();
+  assert.equal(api.iconEdits.length, 1);
+  // Restart: same state dir, alice still working.
+  const api2 = new FakeApi();
+  const ep2 = new FakeEndpoint();
+  ep2.roster = [agent("alice", "working")];
+  mirrorIn(dir, api2, ep2).start();
+  await tick();
+  assert.deepEqual(api2.iconEdits, [], "no service-message spam on every bridge restart");
+});
+
+test("an icon failure is swallowed — status decoration never blocks delivery", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "tg-"));
+  const api = new FakeApi();
+  const ep = new FakeEndpoint();
+  mirrorIn(dir, api, ep).start();
+  await tick();
+  api.iconEditThrows = () => { throw new TelegramApiError("telegram editForumTopic failed: Bad Request", 400, true); };
+  ep.emit("presence", { type: "join", presence: agent("alice", "idle") });
+  await tick();
+  ep.emit("message", dm("alice", "still delivers"), delivery, live);
+  await tick();
+  assert.equal(api.sends.at(-1)!.text, "alice: still delivers");
+  assert.equal(api.sends.at(-1)!.thread, 100);
+});
+
+test("a status with no mapped icon is ignored (never a blank or fabricated icon)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "tg-"));
+  const api = new FakeApi();
+  const ep = new FakeEndpoint();
+  mirrorIn(dir, api, ep).start();
+  await tick();
+  ep.emit("presence", { type: "join", presence: agent("alice", "hibernating") });
+  await tick();
+  assert.deepEqual(api.iconEdits, []);
+});
+
+test("a recreated topic is re-stamped (the old icon record dies with the old topic)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "tg-"));
+  const api = new FakeApi();
+  const ep = new FakeEndpoint();
+  mirrorIn(dir, api, ep).start();
+  await tick();
+  ep.emit("presence", { type: "join", presence: agent("alice", "idle") });
+  await tick();
+  api.sendThrows = (t) => {
+    if (t === 100) throw new TelegramApiError("telegram sendMessage failed: Bad Request: message thread not found", 400, true);
+  };
+  ep.emit("message", dm("alice", "hi"), delivery, live); // forces the recreate
+  await tick();
+  api.sendThrows = undefined;
+  ep.emit("presence", { type: "update", presence: agent("alice", "idle") });
+  await tick();
+  assert.deepEqual(api.iconEdits.map((e) => e.threadId), [100, 101], "the NEW topic gets the icon too");
 });

@@ -74,6 +74,29 @@ export function attachGroupMirror(deps: GroupMirrorDeps): GroupMirror {
  *  "not this kind of message, carry on". */
 const SKIP = Symbol("skip");
 
+/**
+ * Agent status → the topic icon that shows it.
+ *
+ * `icon_color` is IMMUTABLE once a topic exists (editForumTopic has no such parameter), so the colored
+ * dot can never carry status — a custom emoji is the only mutable icon. And a bot isn't Premium, so the
+ * only emoji it may use are the ~112 in Telegram's default topic-icon pack, which contains no traffic
+ * lights. These are the closest the pack allows:
+ *
+ *   idle    ✅  present and free
+ *   working ⚡️  busy (and the pack's yellow)
+ *   waiting 👀  blocked on something — the same glyph the send signal uses for "one agent has this"
+ *   offline ☕️  away
+ */
+export const STATUS_ICONS: Record<string, string> = {
+  idle: "✅",
+  working: "⚡️",
+  waiting: "👀",
+  offline: "☕️",
+};
+
+/** Telegram writes emoji with a trailing variation selector inconsistently — compare without it. */
+const bareEmoji = (e: string) => e.replace(/\uFE0F/g, "");
+
 export class GroupMirror {
   private readonly ep: CotalEndpoint;
   private readonly api: TelegramApi;
@@ -83,6 +106,8 @@ export class GroupMirror {
   private readonly log: (m: string) => void;
   private readonly transcriber?: Transcriber;
   private readonly topics: TopicRegistry;
+  /** Lazily-resolved emoji → custom_emoji_id map for the bot-allowed icon pack. */
+  private iconPack?: Promise<Map<string, string>>;
   /** The group this mirror owns — every method is a no-op for any other chat. */
   readonly chatId: number;
 
@@ -102,11 +127,15 @@ export class GroupMirror {
   /** Subscribe to the mesh: presence → topics, messages → threaded delivery. */
   start(): void {
     this.ep.on("presence", (e: PresenceEvent) => {
+      const card = e?.presence?.card;
+      if (!card) return;
       // A topic is created when an agent JOINS — the topic list is the agent list, not a log of who
-      // happened to speak. "update" (a heartbeat/status change) and "offline" are ignored: an agent that
-      // leaves KEEPS its topic, so its history survives and a return lands back in the same place.
-      if (e?.type !== "join") return;
-      void this.ensureTopicFor(e.presence?.card);
+      // happened to speak. An agent that leaves KEEPS its topic, so its history survives and a return
+      // lands back in the same place; only its ICON changes.
+      if (e.type === "join") void this.ensureTopicFor(card, e.presence.status);
+      // EVERY event (join / heartbeat / offline) carries the current status, and applyStatusIcon is a
+      // no-op unless it actually differs from what's on the topic.
+      else void this.applyStatusIcon(card.name, e.presence.status);
     });
 
     this.ep.on("message", (msg: CotalMessage, delivery: Delivery, meta: MessageMeta) => {
@@ -122,7 +151,7 @@ export class GroupMirror {
   private async seedFromRoster(): Promise<void> {
     try {
       await this.ep.waitForPresenceSnapshot();
-      for (const p of this.ep.getRoster() as Presence[]) await this.ensureTopicFor(p.card);
+      for (const p of this.ep.getRoster() as Presence[]) await this.ensureTopicFor(p.card, p.status);
     } catch (e) {
       this.log(`seeding topics from the roster failed (they'll be created as agents speak): ${(e as Error).message}`);
     }
@@ -130,10 +159,11 @@ export class GroupMirror {
 
   /** One topic per agent. Endpoints (this bridge, other dashboards) and ourselves are skipped — they're
    *  observers, not conversation partners, so they'd only add empty topics. */
-  private async ensureTopicFor(card: Card | undefined): Promise<void> {
+  private async ensureTopicFor(card: Card | undefined, status?: string): Promise<void> {
     if (!card || card.id === this.ep.card.id || card.kind === "endpoint") return;
     try {
       await this.topics.ensure(this.chatId, card.name);
+      if (status) await this.applyStatusIcon(card.name, status);
     } catch (e) {
       // Never fatal: the topic is retried on this agent's next message, and delivery falls back to
       // General meanwhile. A rate limit on a burst of joins resolves itself.
@@ -357,6 +387,46 @@ export class GroupMirror {
       });
     } catch (e) {
       this.log(`#files announce failed (ignored): ${(e as Error).message}`);
+    }
+  }
+
+  /** emoji → custom_emoji_id for the bot-allowed topic-icon pack, fetched once. A failure caches an
+   *  EMPTY map (icons are cosmetic — never block delivery on them) but is logged. */
+  private async iconIds(): Promise<Map<string, string>> {
+    this.iconPack ??= this.api
+      .getForumTopicIconStickers()
+      .then((stickers) => {
+        const m = new Map<string, string>();
+        for (const s of stickers) if (s.emoji) m.set(bareEmoji(s.emoji), s.custom_emoji_id);
+        return m;
+      })
+      .catch((e) => {
+        this.log(`couldn't load the topic-icon pack, status icons disabled: ${(e as Error).message}`);
+        return new Map<string, string>();
+      });
+    return this.iconPack;
+  }
+
+  /**
+   * Stamp an agent's topic with the icon for its current status. Skipped when the icon is ALREADY the
+   * one we want — every edit posts a `forum_topic_edited` service message into the topic, so re-stamping
+   * on each presence heartbeat would bury the conversation under notices.
+   *
+   * Entirely best-effort: an icon is decoration, and must never interfere with delivery.
+   */
+  private async applyStatusIcon(agent: string, status: string): Promise<void> {
+    const emoji = STATUS_ICONS[status];
+    if (!emoji || this.topics.iconOf(this.chatId, agent) === emoji) return;
+    const threadId = this.topics.threadIdOf(this.chatId, agent);
+    if (threadId === undefined) return; // no topic yet — the icon is applied when it's created
+    const id = (await this.iconIds()).get(bareEmoji(emoji));
+    if (!id) return;
+    try {
+      await this.api.editForumTopicIcon(this.chatId, threadId, id);
+      this.topics.setIcon(this.chatId, agent, emoji);
+      this.log(`topic ${threadId} (${agent}) → ${emoji} ${status}`);
+    } catch (e) {
+      this.log(`couldn't set the ${status} icon on ${agent}'s topic (ignored): ${(e as Error).message}`);
     }
   }
 

@@ -167,7 +167,8 @@ The group is owned end to end by `src/group.ts` — if the bridge knew it too, e
 | **When a topic appears** | When the agent **joins the mesh** — the topic list is the agent list, not a log of who happened to speak. Agents already present at startup are seeded from the roster (no join event fires for those). |
 | **What it's keyed on** | The agent **name** — what `@name` addresses, and what survives a respawn, so a restarted agent returns to its own topic instead of stranding its history. |
 | **Who gets one** | Agents. Endpoints (this bridge, dashboards) are skipped — they're observers, and would only add empty topics. |
-| **When an agent leaves** | It **keeps** its topic. History survives and a return lands in the same place. |
+| **When an agent leaves** | It **keeps** its topic. History survives and a return lands in the same place — only its icon changes. |
+| **Status at a glance** | The topic **icon** tracks the agent: ✅ idle · ⚡️ working · 👀 waiting · ☕️ offline. `icon_color` is immutable once a topic exists, so a custom emoji is the only icon that can change — and a bot may only use Telegram's default topic-icon pack (which has no traffic lights), so these are the closest it allows. Re-stamped only when the status actually changes, and persisted, so a heartbeat or a bridge restart doesn't bury each topic under `changed the icon` notices. |
 | **The General topic** | Addresses nobody in particular, so anything typed there is ignored with a note. Use the DM for commands. |
 
 **Recovery, because the Bot API is thin here.** There's **no way to list a forum's topics** and **no update

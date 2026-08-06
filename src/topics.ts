@@ -25,6 +25,10 @@ export interface TopicFile {
   v: 1;
   /** chatId (as a JSON key) → { agent name → thread id }. */
   chats: Record<string, Record<string, number>>;
+  /** chatId → { agent name → the status emoji currently ON that topic }. Kept so a restart doesn't
+   *  re-stamp every topic (each icon edit posts a service message into the topic). A SEPARATE key, so
+   *  a file written before status icons existed still loads with no migration. */
+  icons?: Record<string, Record<string, string>>;
 }
 
 /** Telegram's SIX allowed topic icon colors (any other value is rejected by createForumTopic). */
@@ -70,6 +74,17 @@ export function readTopics(cfg: EndpointConfig, log?: (m: string) => void): Topi
     const chats = (raw as TopicFile).chats;
     if (!chats || typeof chats !== "object") return empty;
     const out: TopicFile = { v: 1, chats: {} };
+    const icons = (raw as TopicFile).icons;
+    if (icons && typeof icons === "object") {
+      for (const [chatId, agents] of Object.entries(icons)) {
+        if (!agents || typeof agents !== "object") continue;
+        const clean: Record<string, string> = {};
+        for (const [name, emoji] of Object.entries(agents as Record<string, unknown>)) {
+          if (typeof emoji === "string" && emoji) clean[name] = emoji;
+        }
+        (out.icons ??= {})[chatId] = clean;
+      }
+    }
     for (const [chatId, agents] of Object.entries(chats)) {
       if (!agents || typeof agents !== "object") continue;
       const clean: Record<string, number> = {};
@@ -133,11 +148,33 @@ export class TopicRegistry {
     return undefined;
   }
 
+  /** This agent's thread id in a chat, if it has a topic. */
+  threadIdOf(chatId: number, agent: string): number | undefined {
+    return this.file.chats[String(chatId)]?.[agent];
+  }
+
+  /** The status emoji currently stamped on this agent's topic, if we've stamped one. */
+  iconOf(chatId: number, agent: string): string | undefined {
+    return this.file.icons?.[String(chatId)]?.[agent];
+  }
+
+  /** Record the emoji we just stamped, so a restart doesn't re-stamp an icon that's already correct. */
+  setIcon(chatId: number, agent: string, emoji: string): void {
+    ((this.file.icons ??= {})[String(chatId)] ??= {})[agent] = emoji;
+    try {
+      writeTopics(this.cfg, this.file);
+    } catch (e) {
+      this.log(`couldn't persist the topic icon for ${agent} (in-memory only): ${(e as Error).message}`);
+    }
+  }
+
   /** Drop a mapping — called when Telegram reports the thread is gone, so the next line recreates it. */
   forget(chatId: number, threadId: number): void {
     const name = this.agentOf(chatId, threadId);
     if (!name) return;
     delete this.file.chats[String(chatId)][name];
+    // The recreated topic starts iconless, so forget the stamp too or it would never be re-applied.
+    if (this.file.icons?.[String(chatId)]) delete this.file.icons[String(chatId)][name];
     try {
       writeTopics(this.cfg, this.file);
     } catch (e) {

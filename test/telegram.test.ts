@@ -114,6 +114,14 @@ class FakeApi implements TelegramApi {
     this.isForumThrows?.();
     return this.forums.has(chatId);
   }
+  iconEdits: { threadId: number; customEmojiId: string }[] = [];
+  async editForumTopicIcon(_chatId: number, threadId: number, customEmojiId: string) {
+    this.iconEdits.push({ threadId, customEmojiId });
+  }
+  async getForumTopicIconStickers() {
+    return [{ emoji: "✅", custom_emoji_id: "id-check" }, { emoji: "⚡️", custom_emoji_id: "id-bolt" },
+            { emoji: "👀", custom_emoji_id: "id-eyes" }, { emoji: "☕️", custom_emoji_id: "id-coffee" }];
+  }
   async createForumTopic(chatId: number, name: string, iconColor?: number) {
     this.createTopicThrows?.();
     this.topicsCreated.push({ chatId, name, iconColor });
