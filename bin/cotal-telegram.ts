@@ -37,7 +37,8 @@ async function main(): Promise<void> {
   // Presence under-reports `working` (it fires only on a human prompt), so a mesh-triggered turn would
   // show as idle forever. The tracker polls a truer signal; absent paw, it simply has no opinion and the
   // icons fall back to presence exactly as before.
-  const busy = cfg.topicsChat
+  // Only worth polling when something consumes it — with status icons off it would be pure waste.
+  const busy = cfg.topicsChat && cfg.statusIcons
     ? new BusyTracker({
         space: cfg.space,
         log,

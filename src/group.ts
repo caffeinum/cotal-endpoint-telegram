@@ -165,6 +165,30 @@ export class GroupMirror {
     // fill up as agents restart. Runs after the presence watch has its first snapshot.
     void this.seedFromRoster();
     void this.seedChannels();
+    void this.clearStatusIcons();
+  }
+
+  /**
+   * With status icons off, strip any icon a previous run stamped — otherwise every topic freezes wearing
+   * whatever it last showed, and a topic stuck on ⚡️ for an agent that finished hours ago is worse than
+   * no icon at all. Runs once: the recorded stamps are forgotten, so a later restart is a no-op.
+   *
+   * Channel topics are skipped — their 💬 is identity, not status, and doesn't go stale.
+   */
+  private async clearStatusIcons(): Promise<void> {
+    if (this.cfg.statusIcons) return;
+    for (const agent of this.topics.stampedAgents(this.chatId)) {
+      if (agent.startsWith("#")) continue;
+      const threadId = this.topics.threadIdOf(this.chatId, agent);
+      if (threadId === undefined) continue;
+      try {
+        await this.api.editForumTopicIcon(this.chatId, threadId, ""); // empty = back to the plain dot
+        this.topics.clearIcon(this.chatId, agent);
+        this.log(`topic ${threadId} (${agent}): status icon cleared (status icons are off)`);
+      } catch (e) {
+        this.log(`couldn't clear ${agent}'s topic icon (ignored): ${(e as Error).message}`);
+      }
+    }
   }
 
   /** Create topics for everyone already on the roster at startup (no join event fires for them). */
@@ -489,6 +513,9 @@ export class GroupMirror {
 
   private async applyStatusIcon(agent: string, status: string): Promise<void> {
     this.lastStatus.set(agent, status);
+    // Status icons are OFF by default. The status is still tracked (so re-enabling is instant and the
+    // log still reports it), only the icon edit is suppressed.
+    if (!this.cfg.statusIcons) return;
     const emoji = STATUS_ICONS[this.effectiveStatus(agent, status)];
     if (emoji) await this.applyIcon(agent, emoji, this.effectiveStatus(agent, status));
   }

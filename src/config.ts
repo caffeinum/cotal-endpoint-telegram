@@ -26,6 +26,11 @@ export interface Config extends EndpointConfig {
    *  organizer group is off entirely. Deliberately NOT one of the {@link seedChats}: the bridge must not
    *  know this chat, or it would fan every line out to it a second time, unthreaded. */
   topicsChat?: number;
+  /** Drive each agent topic's icon from its status (✅ idle · ⚡️ working · 👀 waiting · ☕️ offline).
+   *  DEFAULT OFF — the constant icon churn was more noise than signal. `--status-icons` turns it back
+   *  on; the code is intact, just inert. Channel topics keep their one-time 💬, which is identity, not
+   *  status. */
+  statusIcons: boolean;
   /** Channels to mirror into the organizer group, one topic per channel (`--channels a,b,c`). The
    *  endpoint JOINS each at startup, so a channel listed here is one whose traffic actually arrives.
    *  Absent → just {@link EndpointConfig.channel}, the one the bridge already subscribes to. */
@@ -95,6 +100,8 @@ export interface RawArgs {
   topics?: string;
   /** Set by `--channels a,b,c`: which channels get their own topic in the organizer group. */
   channels?: string;
+  /** Set by `--status-icons`: re-enable status-driven topic icons (off by default). */
+  statusIcons?: boolean;
   /** Set by `--wake-agent <name>`: the agent `/wake` switches the chat to once it's up. */
   wakeAgent?: string;
 }
@@ -126,6 +133,7 @@ export function parseArgs(argv: string[]): RawArgs {
     else if (a === "--topics") out.topics = val(a, ++i);
     else if (a === "--channels") out.channels = val(a, ++i);
     else if (a === "--wake-agent") out.wakeAgent = val(a, ++i);
+    else if (a === "--status-icons") out.statusIcons = true;
     else if (a === "--no-markdown" || a === "--plain") out.markdown = false;
     else throw new Error(`cotal-telegram: unknown flag "${a}"`);
   }
@@ -149,6 +157,7 @@ export function buildConfig(raw: RawArgs): Config {
     learnFirstChat: raw.learnFirstChat ?? false,
     markdown: raw.markdown ?? true,
     topicsChat: raw.topics === undefined ? undefined : topicsChatOrThrow(raw.topics),
+    statusIcons: raw.statusIcons ?? false,
     mirrorChannels: parseChannelList(raw.channels, raw.channel ?? DEFAULT_CHANNEL),
     wakeAgent:
       raw.wakeAgent ?? process.env.COTAL_TG_WAKE_AGENT ?? agentFromWakeCommand(raw.wakeCommand ?? process.env.COTAL_TG_WAKE_COMMAND),

@@ -23,7 +23,7 @@ function cfgIn(dir: string, over: Partial<Config> = {}): Config {
   return {
     space: "t", server: "nats://127.0.0.1:4222", name: "telegram", channel: "general", token: "x:y",
     stateRoot: dir, seedChats: [42], learnFirstChat: false, markdown: true, topicsChat: GROUP,
-    mirrorChannels: [], ...over,
+    mirrorChannels: [], statusIcons: true, ...over,
   };
 }
 
@@ -770,4 +770,67 @@ test("refreshStatus for an agent never seen through presence is a no-op", async 
   await tick();
   await m.refreshStatus("ghost");
   assert.deepEqual(api.iconEdits, []);
+});
+
+// ── status icons are OFF by default ───────────────────────────────────────────────────────────────
+test("with status icons off, presence changes stamp nothing", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "tg-"));
+  const api = new FakeApi();
+  const ep = new FakeEndpoint();
+  mirrorIn(dir, api, ep, { statusIcons: false }).start();
+  await tick();
+  ep.emit("presence", { type: "join", presence: agent("alice", "working") });
+  await tick();
+  ep.emit("presence", { type: "update", presence: agent("alice", "idle") });
+  await tick();
+  assert.deepEqual(api.iconEdits, [], "no icon churn");
+  assert.deepEqual(api.topicsCreated.map((t) => t.name), ["alice"], "the topic is still created");
+});
+
+test("a channel topic still gets its 💬 — that's identity, not status", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "tg-"));
+  const api = new FakeApi();
+  const ep = new FakeEndpoint();
+  mirrorIn(dir, api, ep, { statusIcons: false, mirrorChannels: ["general"] }).start();
+  await tick();
+  assert.deepEqual(api.iconEdits.map((e) => e.customEmojiId), ["id-chat"]);
+});
+
+test("icons stamped by a previous run are CLEARED, not left frozen mid-status", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "tg-"));
+  // A run WITH icons stamps alice ⚡️…
+  const api1 = new FakeApi();
+  const ep1 = new FakeEndpoint();
+  mirrorIn(dir, api1, ep1, { statusIcons: true }).start();
+  await tick();
+  ep1.emit("presence", { type: "join", presence: agent("alice", "working") });
+  await tick();
+  assert.deepEqual(api1.iconEdits.map((e) => e.customEmojiId), ["id-bolt"]);
+  // …then the feature is turned off. A frozen ⚡️ on an agent that stopped hours ago is worse than none.
+  const api2 = new FakeApi();
+  const ep2 = new FakeEndpoint();
+  mirrorIn(dir, api2, ep2, { statusIcons: false }).start();
+  await tick();
+  assert.deepEqual(api2.iconEdits, [{ threadId: 100, customEmojiId: "" }], "empty id = back to the plain dot");
+  // And it's a one-shot: a later restart has nothing left to clear.
+  const api3 = new FakeApi();
+  mirrorIn(dir, api3, new FakeEndpoint(), { statusIcons: false }).start();
+  await tick();
+  assert.deepEqual(api3.iconEdits, []);
+});
+
+test("the clear leaves channel topics alone", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "tg-"));
+  const api1 = new FakeApi();
+  mirrorIn(dir, api1, new FakeEndpoint(), { statusIcons: true, mirrorChannels: ["general"] }).start();
+  await tick();
+  assert.deepEqual(api1.iconEdits.map((e) => e.customEmojiId), ["id-chat"], "💬 stamped on the first run");
+  // Turning status icons off must not strip a channel's 💬 — it is identity, not status, and never
+  // goes stale. It also isn't re-stamped, because it is already correct; a needless edit would post a
+  // service message for nothing.
+  const api2 = new FakeApi();
+  mirrorIn(dir, api2, new FakeEndpoint(), { statusIcons: false, mirrorChannels: ["general"] }).start();
+  await tick();
+  assert.deepEqual(api2.iconEdits, [], "nothing cleared, nothing re-stamped");
+  assert.equal(readTopics(cfgIn(dir)).icons?.[String(GROUP)]?.["#general"], "💬", "the record survives");
 });

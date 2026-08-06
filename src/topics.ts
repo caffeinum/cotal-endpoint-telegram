@@ -159,6 +159,23 @@ export class TopicRegistry {
     return this.file.icons?.[String(chatId)]?.[agent];
   }
 
+  /** Every key we've stamped an icon on in this chat. */
+  stampedAgents(chatId: number): string[] {
+    return Object.keys(this.file.icons?.[String(chatId)] ?? {});
+  }
+
+  /** Forget a recorded stamp — after removing the icon from the topic itself. */
+  clearIcon(chatId: number, agent: string): void {
+    const chat = this.file.icons?.[String(chatId)];
+    if (!chat || !(agent in chat)) return;
+    delete chat[agent];
+    try {
+      writeTopics(this.cfg, this.file);
+    } catch (e) {
+      this.log(`couldn't persist the icon clear for ${agent} (in-memory only): ${(e as Error).message}`);
+    }
+  }
+
   /** Record the emoji we just stamped, so a restart doesn't re-stamp an icon that's already correct. */
   setIcon(chatId: number, agent: string, emoji: string): void {
     ((this.file.icons ??= {})[String(chatId)] ??= {})[agent] = emoji;
