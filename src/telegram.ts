@@ -13,6 +13,7 @@ import { SendError, type ButtonChoice, type CallbackQuery, type CommandDesc, typ
 import { readOffset, writeOffset } from "@cotal-ai/endpoint-core";
 import type { Config } from "./config.js";
 import { telegramFormatter } from "./format.js";
+import { isWakeCommand } from "./wake.js";
 
 export interface TgUser {
   id: number;
@@ -265,6 +266,9 @@ export function telegramTransport(
    *  never sees it — that group is handled end to end by src/group.ts, so the two can't double-handle a
    *  message or contend for the one long-poll cursor. */
   onGroupUpdate?: (m: TgMessage) => Promise<boolean>,
+  /** Called after a `/wake` has been handled. Resolves the agent name to point this chat at once it is
+   *  actually on the mesh, or undefined to leave the target alone. See src/wake.ts for why this waits. */
+  onWake?: () => Promise<string | undefined>,
 ): Transport {
   /** Map one Telegram update to a channel-agnostic Inbound (undefined for a message-less update). */
   function toInbound(u: TgUpdate): Inbound | undefined {
@@ -387,6 +391,13 @@ export function telegramTransport(
           if (inbound) {
             try {
               await onInbound(inbound);
+              // `/wake` FOLLOW-THROUGH: the wake has now run, so point the chat at the agent it brought
+              // up by issuing the `/to <agent>` the human would have typed next. Synthesized through the
+              // SAME command path, so the sticky latches and persists exactly as a typed one would.
+              if (onWake && isWakeCommand(inbound.text)) {
+                const agent = await onWake();
+                if (agent) await onInbound({ ...inbound, text: `/to ${agent}` });
+              }
             } catch (e) {
               // POISON-UPDATE GUARD: one un-routable inbound must NOT wedge the whole queue by re-failing
               // the head forever. Log loudly, then STILL advance past it.

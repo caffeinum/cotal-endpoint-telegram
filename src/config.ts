@@ -29,6 +29,9 @@ export interface Config extends EndpointConfig {
    *  endpoint JOINS each at startup, so a channel listed here is one whose traffic actually arrives.
    *  Absent → just {@link EndpointConfig.channel}, the one the bridge already subscribes to. */
   mirrorChannels: string[];
+  /** After a successful `/wake`, point the chat at this agent (`--wake-agent <name>`), so the next line
+   *  you type goes to the agent you just woke. Absent → `/wake` leaves the sticky target alone. */
+  wakeAgent?: string;
 }
 
 const DEFAULT_SERVER = "nats://127.0.0.1:4222"; // core's DEFAULT_SERVER (kept literal so config has no core-runtime dep)
@@ -89,6 +92,8 @@ export interface RawArgs {
   topics?: string;
   /** Set by `--channels a,b,c`: which channels get their own topic in the organizer group. */
   channels?: string;
+  /** Set by `--wake-agent <name>`: the agent `/wake` switches the chat to once it's up. */
+  wakeAgent?: string;
 }
 
 export function parseArgs(argv: string[]): RawArgs {
@@ -117,6 +122,7 @@ export function parseArgs(argv: string[]): RawArgs {
     else if (a === "--learn-first-chat") out.learnFirstChat = true;
     else if (a === "--topics") out.topics = val(a, ++i);
     else if (a === "--channels") out.channels = val(a, ++i);
+    else if (a === "--wake-agent") out.wakeAgent = val(a, ++i);
     else if (a === "--no-markdown" || a === "--plain") out.markdown = false;
     else throw new Error(`cotal-telegram: unknown flag "${a}"`);
   }
@@ -141,6 +147,7 @@ export function buildConfig(raw: RawArgs): Config {
     markdown: raw.markdown ?? true,
     topicsChat: raw.topics === undefined ? undefined : topicsChatOrThrow(raw.topics),
     mirrorChannels: parseChannelList(raw.channels, raw.channel ?? DEFAULT_CHANNEL),
+    wakeAgent: raw.wakeAgent ?? process.env.COTAL_TG_WAKE_AGENT,
     filesDir: raw.filesDir,
     helpFooter: raw.helpFooter ?? process.env.COTAL_TG_HELP_FOOTER,
     wakeCommand: raw.wakeCommand ?? process.env.COTAL_TG_WAKE_COMMAND,

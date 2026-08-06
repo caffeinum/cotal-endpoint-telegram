@@ -19,6 +19,7 @@ import { attachGroupMirror } from "../src/group.js";
 import { httpApi, telegramTransport } from "../src/telegram.js";
 import { telegramFormatter } from "../src/format.js";
 import { groqTranscriber } from "../src/transcribe.js";
+import { waitForPeer } from "../src/wake.js";
 import { TELEGRAM_MAX } from "../src/telegram.js";
 
 async function main(): Promise<void> {
@@ -36,7 +37,18 @@ async function main(): Promise<void> {
     ? attachGroupMirror({ ep, api, cfg, formatter: telegramFormatter(cfg.markdown), maxLen: TELEGRAM_MAX, transcriber, log })
     : undefined;
 
-  const transport = telegramTransport(api, cfg, log, mirror ? (m) => mirror.handleUpdate(m) : undefined);
+  // `/wake` follow-through: once the woken agent is actually on the mesh, point the chat at it. The WAIT
+  // matters — `paw global` returning means the process started, not that it has registered, so switching
+  // immediately would race presence and fail with "no peer".
+  const onWake = cfg.wakeAgent
+    ? async () => {
+        const name = cfg.wakeAgent as string;
+        if (await waitForPeer(ep, name)) return name;
+        log(`/wake: "${name}" never appeared on the roster — leaving the chat's target alone`);
+        return undefined;
+      }
+    : undefined;
+  const transport = telegramTransport(api, cfg, log, mirror ? (m) => mirror.handleUpdate(m) : undefined, onWake);
   const bridge = await runBridge(cfg, transport, { transcriber, log, buildEndpoint: () => ep });
   // AFTER runBridge: it calls ep.start(), and the roster seed needs a connected presence watch.
   if (mirror) {

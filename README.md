@@ -89,7 +89,7 @@ TELEGRAM_BOT_TOKEN=… npx tsx bin/cotal-telegram.ts --space demo --creds ./tele
 
 Flags: `--server <nats-url>` · `--space <s>` · `--name <peer>` · `--channel <c>` · `--token <file|value>`
 · `--creds <file>` · `--groq-key <file|value>` · `--chat <id>` · `--files-dir <dir>` · `--learn-first-chat`
-· `--topics <chat-id>` · `--channels <a,b,c>` · `--no-markdown` (alias `--plain`). The token may also come from `$TELEGRAM_BOT_TOKEN`, the Groq key from
+· `--topics <chat-id>` · `--channels <a,b,c>` · `--wake-agent <name>` · `--no-markdown` (alias `--plain`). The token may also come from `$TELEGRAM_BOT_TOKEN`, the Groq key from
 `$GROQ_API_KEY`.
 
 **Markdown formatting (default ON):** agent output is rendered to Telegram so `**bold**`/`*bold*`,
@@ -137,6 +137,14 @@ begin. Either seed it with `--chat <id>`, or pass `--learn-first-chat` and text 
 inbound is learned into `<state>/<space>/chats.json`). Until a chat is bound, a mesh DM is held (unacked,
 redelivered by JetStream) so nothing is lost; a channel post is dropped.
 
+
+**`/wake` points the chat at what it woke.** With `--wake-agent <name>` (or `$COTAL_TG_WAKE_AGENT`), a
+successful `/wake` is followed by the `/to <name>` you'd have typed next, so the agent you just brought up
+is the one your next line reaches. It **waits for that agent to actually register on the mesh** first —
+the wake command returning means the process started, not that it joined, so switching immediately would
+race presence and fail with "no peer". If it never shows up within ~20s the chat's target is left alone.
+The switch is issued as a real `/to`, through the same command path a typed one takes, so it latches and
+persists identically. Without the flag, `/wake` behaves exactly as before.
 
 <a name="topics"></a>
 ## The organizer group — one topic per agent (`--topics <chat-id>`)
