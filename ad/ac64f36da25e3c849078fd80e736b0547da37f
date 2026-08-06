@@ -1,0 +1,32 @@
+src/telegram.ts
+  s_31267c8ce90feb::t_edff7796e5d60a 131-137,551-562
+src/topics.ts
+  s_31267c8ce90feb::t_b2cc3166ab7792 151-155
+  s_31267c8ce90feb::t_4f36f19a8519ad 28-31,77-87,156-170,176-177
+test/group.test.ts
+  s_31267c8ce90feb::t_263392878c5fb2 58-67,92
+  s_31267c8ce90feb::t_c84d6fa9056396 471-565
+src/group.ts
+  s_31267c8ce90feb::t_b2cc3166ab7792 77-99,109-110,130-131,133-138,154,162,166,393-429,431
+  s_31267c8ce90feb::t_f45d159fb7b72d 430,432
+test/telegram.test.ts
+  s_31267c8ce90feb::t_263392878c5fb2 117-124
+README.md
+  s_31267c8ce90feb::t_70964ad4f40b1c 170-171
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.21",
+  "base_commit_sha": "adac64f36da25e3c849078fd80e736b0547da37f",
+  "prompts": {},
+  "sessions": {
+    "s_31267c8ce90feb": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "46561531-ea8a-43c3-9869-c191886dd057",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Aleksey Bykhun <theisease@gmail.com>"
+    }
+  }
+}
