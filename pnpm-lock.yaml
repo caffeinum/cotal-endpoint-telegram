@@ -13,7 +13,7 @@ importers:
         version: 0.11.3
       '@cotal-ai/endpoint-core':
         specifier: github:caffeinum/cotal-endpoint-core
-        version: https://codeload.github.com/caffeinum/cotal-endpoint-core/tar.gz/16e5cb012a364b85be1b56a73a70fa82dc459977
+        version: https://codeload.github.com/caffeinum/cotal-endpoint-core/tar.gz/1bfb3cb75287f1f6cec22fdb22e1b2be41209132
     devDependencies:
       '@types/node':
         specifier: 22.19.19
@@ -30,8 +30,8 @@ packages:
   '@cotal-ai/core@0.11.3':
     resolution: {integrity: sha512-5dBx55n2r5N7Fm/lLOAXipWw2YsMeI3U2XqpaQL1AG7vYm6bw5aVH3T9z4EokHTlfnG7Loza1Q6cM08RTPTGIw==}
 
-  '@cotal-ai/endpoint-core@https://codeload.github.com/caffeinum/cotal-endpoint-core/tar.gz/16e5cb012a364b85be1b56a73a70fa82dc459977':
-    resolution: {gitHosted: true, integrity: sha512-HMZDYb5HJFliBYwG2H6yWEfFXlCkF5sFXSS/vAl2Jv/ItBDx/lhJkg4hOvzmps/dKQOTC4P+cFM3arohGHg6PQ==, tarball: https://codeload.github.com/caffeinum/cotal-endpoint-core/tar.gz/16e5cb012a364b85be1b56a73a70fa82dc459977}
+  '@cotal-ai/endpoint-core@https://codeload.github.com/caffeinum/cotal-endpoint-core/tar.gz/1bfb3cb75287f1f6cec22fdb22e1b2be41209132':
+    resolution: {gitHosted: true, integrity: sha512-otcG3IPY3GluKFDOpTIAPhUmoGqVXS4VsvQuQrBJ6fdOoon59s0Cz6GVWsCfSofcEGCybZhuzhpzPRaZ3Bpksw==, tarball: https://codeload.github.com/caffeinum/cotal-endpoint-core/tar.gz/1bfb3cb75287f1f6cec22fdb22e1b2be41209132}
     version: 0.1.0
     engines: {node: '>=22'}
 
@@ -264,7 +264,7 @@ snapshots:
       '@nats-io/transport-node': 3.4.0
       yaml: 2.9.0
 
-  '@cotal-ai/endpoint-core@https://codeload.github.com/caffeinum/cotal-endpoint-core/tar.gz/16e5cb012a364b85be1b56a73a70fa82dc459977':
+  '@cotal-ai/endpoint-core@https://codeload.github.com/caffeinum/cotal-endpoint-core/tar.gz/1bfb3cb75287f1f6cec22fdb22e1b2be41209132':
     dependencies:
       '@cotal-ai/core': 0.11.3
 
