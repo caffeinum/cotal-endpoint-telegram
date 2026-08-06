@@ -87,6 +87,16 @@ const SKIP = Symbol("skip");
  *   waiting 👀  blocked on something — the same glyph the send signal uses for "one agent has this"
  *   offline ☕️  away
  */
+/** A channel topic's icon. Static — a channel has no status, and 💬 reads "conversation". */
+export const CHANNEL_ICON = "💬";
+
+/**
+ * A channel's registry key. Channels and agents share one topic map, so channel keys carry the `#`
+ * sigil — the same one cotal addresses channels with, and a character an agent name never starts with,
+ * so the two namespaces can't collide.
+ */
+export const channelKey = (channel: string) => `#${channel}`;
+
 export const STATUS_ICONS: Record<string, string> = {
   idle: "✅",
   working: "⚡️",
@@ -145,6 +155,7 @@ export class GroupMirror {
     // Agents already present when we connect never emit a "join" — without this, the group would only
     // fill up as agents restart. Runs after the presence watch has its first snapshot.
     void this.seedFromRoster();
+    void this.seedChannels();
   }
 
   /** Create topics for everyone already on the roster at startup (no join event fires for them). */
@@ -154,6 +165,30 @@ export class GroupMirror {
       for (const p of this.ep.getRoster() as Presence[]) await this.ensureTopicFor(p.card, p.status);
     } catch (e) {
       this.log(`seeding topics from the roster failed (they'll be created as agents speak): ${(e as Error).message}`);
+    }
+  }
+
+  /**
+   * One topic per mirrored CHANNEL. Each is JOINED first — the endpoint only receives channels it
+   * subscribes to, so a channel listed but not joined would sit there as a topic that never fills.
+   * The bridge's own default channel is already joined by buildEndpoint; re-joining is harmless.
+   */
+  private async seedChannels(): Promise<void> {
+    for (const channel of this.cfg.mirrorChannels) {
+      try {
+        await this.ep.joinChannel(channel);
+      } catch (e) {
+        // Already joined, or a permission problem. Keep going: the topic is still worth having if the
+        // channel is the one the bridge subscribes to anyway.
+        this.log(`joinChannel(${channel}) — ${(e as Error).message}`);
+      }
+      try {
+        const key = channelKey(channel);
+        await this.topics.ensure(this.chatId, key);
+        await this.applyIcon(key, CHANNEL_ICON);
+      } catch (e) {
+        this.log(`couldn't create the #${channel} topic (retried on its next message): ${(e as Error).message}`);
+      }
     }
   }
 
@@ -190,26 +225,31 @@ export class GroupMirror {
   }
 
   private async deliver(msg: CotalMessage, kind: "dm" | "channel"): Promise<void> {
-    const label = outboundLabel(msg, kind);
+    // A CHANNEL post belongs to the channel's topic, not the sender's: it's a shared conversation, and
+    // filing it under whoever happened to speak would scatter one thread across every agent's topic.
+    // Inside #general the `[#general]` prefix is noise, so the label is just the sender.
+    const channel = kind === "channel" ? (msg as { channel?: string }).channel : undefined;
+    const target = channel ? channelKey(channel) : msg.from.name;
+    const label = channel ? `${msg.from.name}: ` : outboundLabel(msg, kind);
     const body = textOf(msg);
-    const threadId = await this.threadFor(msg.from.name);
+    const threadId = await this.threadFor(target);
     // An agent sends a file back by embedding `[[file:<abs-path>]]` — strip the directive and upload the
     // local file into that agent's topic, exactly as the DM leg does for the private chat.
     const directive = parseFileDirective(body);
     if (directive) {
       const caption = (label + (directive.caption ?? directive.rest ?? "")).trimEnd() || undefined;
       await this.api.sendDocument(this.chatId, directive.path, { caption, message_thread_id: threadId });
-      this.log(`→ topic ${threadId ?? "General"} (${msg.from.name}): file ${basename(directive.path)}`);
+      this.log(`→ topic ${threadId ?? "General"} (${target}): file ${basename(directive.path)}`);
       return;
     }
     // Same chunking + independent per-chunk formatting the bridge uses, so a markup span split across a
     // boundary degrades to literal text instead of emitting a half-open tag.
     const chunks = chunkMessage(label + body, this.maxLen);
     for (let i = 0; i < chunks.length; i++) {
-      await this.post(chunks[i], i === 0 ? label : undefined, threadId, msg.from.name);
+      await this.post(chunks[i], i === 0 ? label : undefined, threadId, target);
     }
     // Mirrors the bridge's own `→ @name` line, so a tail of the log shows the group filling up.
-    this.log(`→ topic ${threadId ?? "General"} (${msg.from.name}): ${chunks.length} chunk(s)`);
+    this.log(`→ topic ${threadId ?? "General"} (${target}): ${chunks.length} chunk(s)`);
   }
 
   /** This agent's topic, or undefined to post in General. A creation failure is NOT fatal — landing in
@@ -265,8 +305,12 @@ export class GroupMirror {
       this.log(`group: ignoring a message in General (type in an agent's topic to reach it)`);
       return true;
     }
-    const agent = this.topics.agentOf(this.chatId, threadId);
-    if (!agent) {
+    const owner = this.topics.agentOf(this.chatId, threadId);
+    // A CHANNEL topic is addressed like the channel it mirrors — typing there broadcasts, exactly as
+    // `#channel …` does from the DM. Symmetric with an agent topic: the topic is the address.
+    const channel = owner?.startsWith("#") ? owner.slice(1) : undefined;
+    const agent = channel ? undefined : owner;
+    if (!owner) {
       // A topic we didn't create (or whose mapping was lost) has no agent behind it — say so rather than
       // guessing from the topic's title, which the human can rename at any time.
       await this.reply(threadId, "this topic isn't bound to an agent — message it from the bot's DM instead");
@@ -284,7 +328,14 @@ export class GroupMirror {
       if (saved !== undefined) text = saved;
     }
     if (!text) return true;
-    const target = this.resolve(agent);
+    if (channel) {
+      await this.ep.multicast(text, { channel });
+      this.log(`→ #${channel} (topic ${threadId}): ${text}`);
+      // ⚡ is the broadcast signal (👀 means exactly one agent has it) — same vocabulary as the DM leg.
+      await this.api.setMessageReaction(this.chatId, m.message_id, "⚡").catch(() => {});
+      return true;
+    }
+    const target = this.resolve(agent as string);
     if (!target) {
       await this.reply(threadId, `"${agent}" isn't on the mesh right now`);
       return true;
@@ -416,17 +467,22 @@ export class GroupMirror {
    */
   private async applyStatusIcon(agent: string, status: string): Promise<void> {
     const emoji = STATUS_ICONS[status];
-    if (!emoji || this.topics.iconOf(this.chatId, agent) === emoji) return;
-    const threadId = this.topics.threadIdOf(this.chatId, agent);
+    if (emoji) await this.applyIcon(agent, emoji, status);
+  }
+
+  /** Stamp `key`'s topic with `emoji`, if it isn't already wearing it. */
+  private async applyIcon(key: string, emoji: string, why = "icon"): Promise<void> {
+    if (this.topics.iconOf(this.chatId, key) === emoji) return;
+    const threadId = this.topics.threadIdOf(this.chatId, key);
     if (threadId === undefined) return; // no topic yet — the icon is applied when it's created
     const id = (await this.iconIds()).get(bareEmoji(emoji));
     if (!id) return;
     try {
       await this.api.editForumTopicIcon(this.chatId, threadId, id);
-      this.topics.setIcon(this.chatId, agent, emoji);
-      this.log(`topic ${threadId} (${agent}) → ${emoji} ${status}`);
+      this.topics.setIcon(this.chatId, key, emoji);
+      this.log(`topic ${threadId} (${key}) → ${emoji} ${why}`);
     } catch (e) {
-      this.log(`couldn't set the ${status} icon on ${agent}'s topic (ignored): ${(e as Error).message}`);
+      this.log(`couldn't set the ${why} icon on ${key}'s topic (ignored): ${(e as Error).message}`);
     }
   }
 

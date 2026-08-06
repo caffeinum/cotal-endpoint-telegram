@@ -25,9 +25,14 @@ export interface Config extends EndpointConfig {
    *  organizer group is off entirely. Deliberately NOT one of the {@link seedChats}: the bridge must not
    *  know this chat, or it would fan every line out to it a second time, unthreaded. */
   topicsChat?: number;
+  /** Channels to mirror into the organizer group, one topic per channel (`--channels a,b,c`). The
+   *  endpoint JOINS each at startup, so a channel listed here is one whose traffic actually arrives.
+   *  Absent → just {@link EndpointConfig.channel}, the one the bridge already subscribes to. */
+  mirrorChannels: string[];
 }
 
 const DEFAULT_SERVER = "nats://127.0.0.1:4222"; // core's DEFAULT_SERVER (kept literal so config has no core-runtime dep)
+const DEFAULT_CHANNEL = "general";
 const DEFAULT_SPACE = "main"; // core's DEFAULT_SPACE
 
 function stateRoot(): string {
@@ -82,6 +87,8 @@ export interface RawArgs {
   wakeTimeout?: string;
   /** Set by `--topics <chat-id>`: the forum supergroup to organize into one topic per agent. */
   topics?: string;
+  /** Set by `--channels a,b,c`: which channels get their own topic in the organizer group. */
+  channels?: string;
 }
 
 export function parseArgs(argv: string[]): RawArgs {
@@ -109,6 +116,7 @@ export function parseArgs(argv: string[]): RawArgs {
     else if (a === "--wake-timeout") out.wakeTimeout = val(a, ++i);
     else if (a === "--learn-first-chat") out.learnFirstChat = true;
     else if (a === "--topics") out.topics = val(a, ++i);
+    else if (a === "--channels") out.channels = val(a, ++i);
     else if (a === "--no-markdown" || a === "--plain") out.markdown = false;
     else throw new Error(`cotal-telegram: unknown flag "${a}"`);
   }
@@ -123,7 +131,7 @@ export function buildConfig(raw: RawArgs): Config {
     space: raw.space ?? DEFAULT_SPACE,
     server: raw.server ?? DEFAULT_SERVER,
     name: raw.name ?? "telegram",
-    channel: raw.channel ?? "general",
+    channel: raw.channel ?? DEFAULT_CHANNEL,
     token: resolveToken(raw.token),
     creds,
     groqKey: resolveGroqKey(raw.groqKey),
@@ -132,6 +140,7 @@ export function buildConfig(raw: RawArgs): Config {
     learnFirstChat: raw.learnFirstChat ?? false,
     markdown: raw.markdown ?? true,
     topicsChat: raw.topics === undefined ? undefined : topicsChatOrThrow(raw.topics),
+    mirrorChannels: parseChannelList(raw.channels, raw.channel ?? DEFAULT_CHANNEL),
     filesDir: raw.filesDir,
     helpFooter: raw.helpFooter ?? process.env.COTAL_TG_HELP_FOOTER,
     wakeCommand: raw.wakeCommand ?? process.env.COTAL_TG_WAKE_COMMAND,
@@ -145,6 +154,22 @@ function wakeSecsOrThrow(s: string): number {
   const n = Number(s);
   if (!Number.isFinite(n) || n <= 0) throw new Error(`cotal-telegram: --wake-timeout expects seconds, got "${s}"`);
   return n;
+}
+
+/**
+ * `--channels a, b ,c` → ["a","b","c"]. A `#` prefix is accepted and stripped (people write `#general`).
+ * Omitted → just the endpoint's own default channel, so `--topics` alone mirrors #general with no extra
+ * configuration. Fail loud on a value that parses to nothing — a typo'd `--channels ",,"` that silently
+ * mirrored nothing is exactly the kind of thing you re-pass three times before noticing.
+ */
+export function parseChannelList(raw: string | undefined, fallback: string): string[] {
+  if (raw === undefined) return [fallback];
+  const names = raw
+    .split(",")
+    .map((c) => c.trim().replace(/^#/, ""))
+    .filter(Boolean);
+  if (names.length === 0) throw new Error(`cotal-telegram: --channels listed no channel names (got "${raw}")`);
+  return [...new Set(names)];
 }
 
 /** A forum supergroup id is negative and starts -100 — fail loud on a positive/user id rather than

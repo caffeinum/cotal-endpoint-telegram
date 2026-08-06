@@ -89,7 +89,7 @@ TELEGRAM_BOT_TOKEN=… npx tsx bin/cotal-telegram.ts --space demo --creds ./tele
 
 Flags: `--server <nats-url>` · `--space <s>` · `--name <peer>` · `--channel <c>` · `--token <file|value>`
 · `--creds <file>` · `--groq-key <file|value>` · `--chat <id>` · `--files-dir <dir>` · `--learn-first-chat`
-· `--topics <chat-id>` · `--no-markdown` (alias `--plain`). The token may also come from `$TELEGRAM_BOT_TOKEN`, the Groq key from
+· `--topics <chat-id>` · `--channels <a,b,c>` · `--no-markdown` (alias `--plain`). The token may also come from `$TELEGRAM_BOT_TOKEN`, the Groq key from
 `$GROQ_API_KEY`.
 
 **Markdown formatting (default ON):** agent output is rendered to Telegram so `**bold**`/`*bold*`,
@@ -148,7 +148,9 @@ whom changes.
 ```
 agent joins the mesh   → its topic is created (before it has said anything)
 agent sends a message  → the message lands in that agent's topic
-you type in a topic    → it goes to that agent — the topic IS the address, no @name needed
+a channel gets a post  → it lands in that CHANNEL's topic (#general), not the sender's
+you type in a topic    → it goes to that agent (or broadcasts, in a channel topic)
+                         the topic IS the address — no @name, no #channel needed
 ```
 
 Your 1:1 DM with the bot is untouched and keeps receiving everything, so the group **mirrors** rather than
@@ -169,6 +171,7 @@ The group is owned end to end by `src/group.ts` — if the bridge knew it too, e
 | **Who gets one** | Agents. Endpoints (this bridge, dashboards) are skipped — they're observers, and would only add empty topics. |
 | **When an agent leaves** | It **keeps** its topic. History survives and a return lands in the same place — only its icon changes. |
 | **Status at a glance** | The topic **icon** tracks the agent: ✅ idle · ⚡️ working · 👀 waiting · ☕️ offline. `icon_color` is immutable once a topic exists, so a custom emoji is the only icon that can change — and a bot may only use Telegram's default topic-icon pack (which has no traffic lights), so these are the closest it allows. Re-stamped only when the status actually changes, and persisted, so a heartbeat or a bridge restart doesn't bury each topic under `changed the icon` notices. |
+| **Channels** | Each mirrored channel gets its own topic too (`#general`, wearing 💬). A channel post is a SHARED conversation, so it lands in the CHANNEL's topic rather than in whichever agent happened to speak — otherwise one thread would scatter across every agent's topic. Typing in a channel topic **broadcasts** to that channel (⚡, the broadcast signal) instead of DMing one agent. Pick them with `--channels a,b,c`; the endpoint JOINS each, since a channel it doesn't subscribe to would never fill its topic. Default: the endpoint's own `--channel`. |
 | **The General topic** | Addresses nobody in particular, so anything typed there is ignored with a note. Use the DM for commands. |
 
 **Recovery, because the Bot API is thin here.** There's **no way to list a forum's topics** and **no update

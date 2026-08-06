@@ -135,7 +135,7 @@ class FakeApi implements TelegramApi {
 }
 
 function cfgIn(dir: string, over: Partial<Config> = {}): Config {
-  return { space: "t", server: "nats://127.0.0.1:4222", name: "telegram", channel: "general", token: "x:y", stateRoot: dir, seedChats: [42], learnFirstChat: false, markdown: true, ...over };
+  return { space: "t", server: "nats://127.0.0.1:4222", name: "telegram", channel: "general", token: "x:y", stateRoot: dir, seedChats: [42], learnFirstChat: false, markdown: true, mirrorChannels: ["general"], ...over };
 }
 const tick = () => new Promise((r) => setTimeout(r, 30));
 

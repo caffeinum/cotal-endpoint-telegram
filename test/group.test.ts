@@ -22,7 +22,8 @@ const GROUP = -1003848099877;
 function cfgIn(dir: string, over: Partial<Config> = {}): Config {
   return {
     space: "t", server: "nats://127.0.0.1:4222", name: "telegram", channel: "general", token: "x:y",
-    stateRoot: dir, seedChats: [42], learnFirstChat: false, markdown: true, topicsChat: GROUP, ...over,
+    stateRoot: dir, seedChats: [42], learnFirstChat: false, markdown: true, topicsChat: GROUP,
+    mirrorChannels: [], ...over,
   };
 }
 
@@ -63,7 +64,8 @@ class FakeApi {
   }
   async getForumTopicIconStickers() {
     return [{ emoji: "✅", custom_emoji_id: "id-check" }, { emoji: "⚡️", custom_emoji_id: "id-bolt" },
-            { emoji: "👀", custom_emoji_id: "id-eyes" }, { emoji: "☕️", custom_emoji_id: "id-coffee" }];
+            { emoji: "👀", custom_emoji_id: "id-eyes" }, { emoji: "☕️", custom_emoji_id: "id-coffee" },
+            { emoji: "💬", custom_emoji_id: "id-chat" }];
   }
   getFileThrows?: () => void;
   async getFile(fileId: string) {
@@ -83,6 +85,9 @@ class FakeEndpoint extends EventEmitter {
   multicasts: { text: string; channel?: string; parts?: { kind: string; [k: string]: unknown }[] }[] = [];
   getRoster() { return this.roster; }
   async waitForPresenceSnapshot() {}
+  joined: string[] = [];
+  joinThrows?: () => void;
+  async joinChannel(channel: string) { this.joinThrows?.(); this.joined.push(channel); return {} as never; }
   async unicast(id: string, text: string) { this.unicasts.push({ id, text }); }
   async multicast(text: string, opts?: { channel?: string; parts?: { kind: string; [k: string]: unknown }[] }) {
     this.multicasts.push({ text, channel: opts?.channel, parts: opts?.parts });
@@ -562,4 +567,101 @@ test("a recreated topic is re-stamped (the old icon record dies with the old top
   ep.emit("presence", { type: "update", presence: agent("alice", "idle") });
   await tick();
   assert.deepEqual(api.iconEdits.map((e) => e.threadId), [100, 101], "the NEW topic gets the icon too");
+});
+
+// ── channels as topics ────────────────────────────────────────────────────────────────────────────
+// A channel post is a SHARED conversation: it belongs to the channel's own topic, not to whichever
+// agent happened to speak (which would scatter one thread across every agent's topic).
+const chanCfg = { mirrorChannels: ["general", "alerts"] };
+const post = (from: string, channel: string, text: string) =>
+  ({ from: { id: "id-" + from, name: from }, parts: [{ kind: "text", text }], channel }) as never;
+const onChannel = { historical: false, kind: "channel" as const };
+
+test("each mirrored channel is JOINED and gets its own topic", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "tg-"));
+  const api = new FakeApi();
+  const ep = new FakeEndpoint();
+  mirrorIn(dir, api, ep, chanCfg).start();
+  await tick();
+  assert.deepEqual(ep.joined, ["general", "alerts"], "a channel we don't subscribe to would never fill its topic");
+  assert.deepEqual(api.topicsCreated.map((t) => t.name), ["#general", "#alerts"]);
+  assert.deepEqual(api.iconEdits.map((e) => e.customEmojiId), ["id-chat", "id-chat"], "channels wear 💬, not a status");
+});
+
+test("a channel post lands in the CHANNEL's topic, not the sender's", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "tg-"));
+  const api = new FakeApi();
+  const ep = new FakeEndpoint();
+  mirrorIn(dir, api, ep, chanCfg).start();
+  await tick();
+  ep.emit("presence", { type: "join", presence: agent("alice") });
+  await tick();
+  ep.emit("message", post("alice", "general", "shipping now"), delivery, onChannel);
+  await tick();
+  const last = api.sends.at(-1)!;
+  assert.equal(last.thread, 100, "#general's topic, not alice's");
+  assert.equal(last.text, "alice: shipping now", "no [#general] prefix — the topic already says which channel");
+});
+
+test("a DM from the same agent still goes to the agent's own topic", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "tg-"));
+  const api = new FakeApi();
+  const ep = new FakeEndpoint();
+  mirrorIn(dir, api, ep, chanCfg).start();
+  await tick();
+  ep.emit("message", post("alice", "general", "to the channel"), delivery, onChannel);
+  await tick();
+  ep.emit("message", dm("alice", "just to you"), delivery, live);
+  await tick();
+  assert.deepEqual(api.sends.map((s) => ({ text: s.text, thread: s.thread })), [
+    { text: "alice: to the channel", thread: 100 }, // #general
+    { text: "alice: just to you", thread: 102 },    // alice's own topic (100/101 are the two channels)
+  ]);
+});
+
+test("typing in a channel topic BROADCASTS to that channel, with the ⚡ signal", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "tg-"));
+  const api = new FakeApi();
+  const ep = new FakeEndpoint();
+  const m = mirrorIn(dir, api, ep, chanCfg);
+  m.start();
+  await tick();
+  assert.equal(await m.handleUpdate(inTopic(100, "morning all")), true);
+  assert.deepEqual(ep.multicasts.map((x) => ({ text: x.text, channel: x.channel })), [
+    { text: "morning all", channel: "general" },
+  ]);
+  assert.deepEqual(ep.unicasts, [], "a channel topic broadcasts — it never unicasts to one agent");
+  assert.deepEqual(api.reactions, [{ messageId: 5, emoji: "⚡" }], "⚡ = broadcast; 👀 would mean one recipient");
+});
+
+test("the second channel's topic routes to the second channel (not just the first)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "tg-"));
+  const api = new FakeApi();
+  const ep = new FakeEndpoint();
+  const m = mirrorIn(dir, api, ep, chanCfg);
+  m.start();
+  await tick();
+  await m.handleUpdate(inTopic(101, "heads up"));
+  assert.deepEqual(ep.multicasts.map((x) => x.channel), ["alerts"]);
+});
+
+test("a channel that fails to join still gets its topic (it may already be subscribed)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "tg-"));
+  const api = new FakeApi();
+  const ep = new FakeEndpoint();
+  ep.joinThrows = () => { throw new Error("already a member"); };
+  mirrorIn(dir, api, ep, { mirrorChannels: ["general"] }).start();
+  await tick();
+  assert.deepEqual(api.topicsCreated.map((t) => t.name), ["#general"]);
+});
+
+test("channel keys can't collide with an agent of the same name", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "tg-"));
+  const api = new FakeApi();
+  const ep = new FakeEndpoint();
+  mirrorIn(dir, api, ep, { mirrorChannels: ["general"] }).start();
+  await tick();
+  ep.emit("presence", { type: "join", presence: agent("general") }); // an AGENT literally named "general"
+  await tick();
+  assert.deepEqual(api.topicsCreated.map((t) => t.name), ["#general", "general"], "two distinct topics");
 });

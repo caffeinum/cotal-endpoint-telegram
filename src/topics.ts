@@ -48,10 +48,11 @@ export function colorFor(name: string): number {
 /** Telegram's hard cap on a topic name. */
 const MAX_TOPIC_NAME = 128;
 
-/** The topic title for an agent. Truncated to Telegram's 128-char cap (a name that long is pathological,
- *  but a 400 here would cost the agent its topic). Pure. */
-export function topicName(agent: string): string {
-  return agent.length <= MAX_TOPIC_NAME ? agent : agent.slice(0, MAX_TOPIC_NAME);
+/** The topic title for a registry key — an agent name, or `#channel` for a mirrored channel (the key
+ *  already carries the sigil). Truncated to Telegram's 128-char cap: a name that long is pathological,
+ *  but a 400 here would cost the agent its topic entirely. Pure. */
+export function topicName(key: string): string {
+  return key.length <= MAX_TOPIC_NAME ? key : key.slice(0, MAX_TOPIC_NAME);
 }
 
 /** True when a Telegram error means "that topic is gone" — the ONLY signal we get that a topic was
