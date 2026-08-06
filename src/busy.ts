@@ -112,10 +112,15 @@ export class BusyTracker {
     const next = parseBusy(stdout);
     if (next.size === 0) return; // unparseable / empty → keep the last good picture rather than blanking it
     this.available = true;
+    // Collect the diff, COMMIT, and only then notify. A listener's whole job is to re-read isBusy(), so
+    // firing while `this.busy` still held the old map handed it the very value it was being told changed
+    // — the icon would resolve from stale state and never move.
+    const changed: [string, boolean][] = [];
     for (const [agent, value] of next) {
-      if (this.busy.get(agent) !== value) this.onChange?.(agent, value);
+      if (this.busy.get(agent) !== value) changed.push([agent, value]);
     }
     this.busy = next;
+    for (const [agent, value] of changed) this.onChange?.(agent, value);
   }
 
   start(): void {

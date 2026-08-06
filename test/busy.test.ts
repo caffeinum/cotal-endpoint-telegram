@@ -75,3 +75,16 @@ test("a transient unparseable probe keeps the last good picture rather than blan
   await t.tick();
   assert.equal(t.isBusy("alice"), true, "one bad read must not report every agent as idle");
 });
+
+test("isBusy already reflects the NEW value inside onChange (state is committed before notifying)", async () => {
+  // A listener's whole job is to re-read isBusy(). Notifying before committing handed it the stale
+  // value it was being told had changed — the icon resolved from old state and never moved.
+  const seen: (boolean | undefined)[] = [];
+  const t: BusyTracker = new BusyTracker({
+    space: "t",
+    probe: async () => rows({ name: "alice", busy: true }),
+    onChange: (agent) => seen.push(t.isBusy(agent)),
+  });
+  await t.tick();
+  assert.deepEqual(seen, [true], "a listener that re-reads must see the value that triggered it");
+});
