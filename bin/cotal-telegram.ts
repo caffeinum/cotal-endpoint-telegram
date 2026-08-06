@@ -29,14 +29,14 @@ async function main(): Promise<void> {
   // ONE endpoint instance, built here so the organizer group can attach to the same mesh peer the bridge
   // uses (cotal allows a single durable consumer per identity — a second endpoint would contend).
   const ep = buildEndpoint(cfg);
+  // Voice transcription is OPTIONAL: build the real Groq transcriber from the configured key, else
+  // undefined → voice messages are skipped gracefully (logged, not fatal). Shared by BOTH legs.
+  const transcriber = cfg.groqKey ? groqTranscriber(cfg.groqKey) : undefined;
   const mirror = cfg.topicsChat
-    ? attachGroupMirror({ ep, api, cfg, formatter: telegramFormatter(cfg.markdown), maxLen: TELEGRAM_MAX, log })
+    ? attachGroupMirror({ ep, api, cfg, formatter: telegramFormatter(cfg.markdown), maxLen: TELEGRAM_MAX, transcriber, log })
     : undefined;
 
   const transport = telegramTransport(api, cfg, log, mirror ? (m) => mirror.handleUpdate(m) : undefined);
-  // Voice transcription is OPTIONAL: build the real Groq transcriber from the configured key, else
-  // undefined → voice messages are skipped gracefully (logged, not fatal).
-  const transcriber = cfg.groqKey ? groqTranscriber(cfg.groqKey) : undefined;
   const bridge = await runBridge(cfg, transport, { transcriber, log, buildEndpoint: () => ep });
   // AFTER runBridge: it calls ep.start(), and the roster seed needs a connected presence watch.
   if (mirror) {

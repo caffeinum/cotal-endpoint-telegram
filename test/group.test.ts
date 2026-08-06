@@ -5,7 +5,7 @@
  */
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { mkdtempSync } from "node:fs";
+import { existsSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -15,6 +15,7 @@ import { telegramFormatter } from "../src/format.js";
 import { attachGroupMirror, type GroupMirror } from "../src/group.js";
 import { colorFor, readTopics, TOPIC_COLORS, topicName } from "../src/topics.js";
 import { TelegramApiError, type TelegramApi, type TgMessage } from "../src/telegram.js";
+import type { Transcriber } from "@cotal-ai/endpoint-core";
 
 const GROUP = -1003848099877;
 
@@ -49,6 +50,17 @@ class FakeApi {
   async setMessageReaction(_chatId: number, messageId: number, emoji: string | undefined) {
     this.reactions.push({ messageId, emoji });
   }
+  documents: { path: string; caption?: string; thread?: number }[] = [];
+  async sendDocument(_chatId: number, path: string, opts?: { caption?: string; message_thread_id?: number }) {
+    this.documents.push({ path, caption: opts?.caption, thread: opts?.message_thread_id });
+    return { message_id: this.nextMessageId++ };
+  }
+  getFileThrows?: () => void;
+  async getFile(fileId: string) {
+    this.getFileThrows?.();
+    return { file_id: fileId, file_path: `voice/${fileId}.oga` };
+  }
+  async downloadFile(_p: string) { return new Uint8Array([1, 2, 3]); }
 }
 
 interface Row { card: { id: string; name: string; kind?: string }; status: string }
@@ -58,9 +70,13 @@ class FakeEndpoint extends EventEmitter {
   card = { id: "telegram-id", name: "telegram", kind: "endpoint" as const };
   roster: Row[] = [];
   unicasts: { id: string; text: string }[] = [];
+  multicasts: { text: string; channel?: string; parts?: { kind: string; [k: string]: unknown }[] }[] = [];
   getRoster() { return this.roster; }
   async waitForPresenceSnapshot() {}
   async unicast(id: string, text: string) { this.unicasts.push({ id, text }); }
+  async multicast(text: string, opts?: { channel?: string; parts?: { kind: string; [k: string]: unknown }[] }) {
+    this.multicasts.push({ text, channel: opts?.channel, parts: opts?.parts });
+  }
 }
 
 const agent = (name: string): Row => ({ card: { id: "id-" + name, name, kind: "agent" }, status: "idle" });
@@ -70,12 +86,20 @@ const live = { historical: false, kind: "dm" as const };
 const delivery = { ack() {}, nak() {}, durable: true };
 const tick = () => new Promise((r) => setTimeout(r, 20));
 
-function mirrorIn(dir: string, api: FakeApi, ep: FakeEndpoint, over: Partial<Config> = {}): GroupMirror {
+function mirrorIn(dir: string, api: FakeApi, ep: FakeEndpoint, over: Partial<Config> = {}, transcriber?: Transcriber): GroupMirror {
   return attachGroupMirror({
     ep: ep as never, api: api as unknown as TelegramApi, cfg: cfgIn(dir, over),
-    formatter: telegramFormatter(true), maxLen: 4096, log: () => {},
+    formatter: telegramFormatter(true), maxLen: 4096, transcriber, log: () => {},
   });
 }
+
+/** A voice note / a document, as Telegram delivers them inside a topic. */
+const voiceIn = (threadId: number, messageId = 7): TgMessage =>
+  ({ message_id: messageId, chat: { id: GROUP, type: "supergroup" }, message_thread_id: threadId, is_topic_message: true,
+     voice: { file_id: "vox1", mime_type: "audio/ogg" } }) as TgMessage;
+const docIn = (threadId: number, filename: string, caption?: string): TgMessage =>
+  ({ message_id: 8, chat: { id: GROUP, type: "supergroup" }, message_thread_id: threadId, is_topic_message: true,
+     caption, document: { file_id: "doc1", file_name: filename, mime_type: "text/plain", file_size: 3 } }) as TgMessage;
 
 // ── topics follow the AGENT LIST, not who happened to speak ───────────────────────────────────────
 test("an agent JOINING the mesh creates its topic — before it has said anything", async () => {
@@ -319,4 +343,118 @@ test("topic color is stable per agent and always one Telegram accepts", () => {
 test("a pathological agent name is truncated to Telegram's 128-char cap, not sent as a 400", () => {
   assert.equal(topicName("x".repeat(200)).length, 128);
   assert.equal(topicName("alice"), "alice");
+});
+
+// ── voice + attachments in a topic ────────────────────────────────────────────────────────────────
+/** Give alice a topic (thread 100) so updates in it resolve to her. */
+async function withAlice(dir: string, api: FakeApi, ep: FakeEndpoint, transcriber?: Transcriber) {
+  ep.roster = [agent("alice")];
+  const m = mirrorIn(dir, api, ep, {}, transcriber);
+  m.start();
+  await tick();
+  ep.emit("presence", { type: "join", presence: agent("alice") });
+  await tick();
+  return m;
+}
+
+test("a voice note in a topic is transcribed and routed to that topic's agent", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "tg-"));
+  const api = new FakeApi();
+  const ep = new FakeEndpoint();
+  const heard: string[] = [];
+  const m = await withAlice(dir, api, ep, {
+    async transcribe(_b, filename) { heard.push(filename); return "  deploy it  "; },
+  });
+  await m.handleUpdate(voiceIn(100));
+  assert.deepEqual(ep.unicasts, [{ id: "id-alice", text: "deploy it" }], "the transcript routes like a typed line");
+  assert.deepEqual(heard, ["vox1.ogg"], "the .oga container is normalized to one the transcriber accepts");
+  assert.deepEqual(api.reactions, [{ messageId: 7, emoji: "👀" }]);
+});
+
+test("voice with NO transcriber is skipped gracefully — nothing routed, nothing thrown", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "tg-"));
+  const api = new FakeApi();
+  const ep = new FakeEndpoint();
+  const m = await withAlice(dir, api, ep); // no transcriber
+  assert.equal(await m.handleUpdate(voiceIn(100)), true);
+  assert.deepEqual(ep.unicasts, []);
+});
+
+test("an EMPTY transcript answers in the topic and routes nothing", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "tg-"));
+  const api = new FakeApi();
+  const ep = new FakeEndpoint();
+  const m = await withAlice(dir, api, ep, { async transcribe() { return "   "; } });
+  await m.handleUpdate(voiceIn(100));
+  assert.deepEqual(ep.unicasts, []);
+  assert.match(api.sends.at(-1)!.text, /heard nothing/);
+  assert.equal(api.sends.at(-1)!.thread, 100, "the notice lands in the topic it was spoken in");
+});
+
+test("a transcription FAILURE is surfaced in the topic, never a redelivery loop", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "tg-"));
+  const api = new FakeApi();
+  const ep = new FakeEndpoint();
+  const m = await withAlice(dir, api, ep, { async transcribe() { throw new Error("groq 500"); } });
+  assert.equal(await m.handleUpdate(voiceIn(100)), true, "the update is still consumed");
+  assert.deepEqual(ep.unicasts, []);
+  assert.match(api.sends.at(-1)!.text, /transcription failed: groq 500/);
+});
+
+test("a document dropped in a topic is saved and routed as a PATH — the binary never crosses the mesh", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "tg-"));
+  const api = new FakeApi();
+  const ep = new FakeEndpoint();
+  const m = await withAlice(dir, api, ep);
+  await m.handleUpdate(docIn(100, "report.txt"));
+  assert.equal(ep.unicasts.length, 1);
+  const routed = ep.unicasts[0];
+  assert.equal(routed.id, "id-alice");
+  assert.match(routed.text, /^📎 report\.txt saved to \//);
+  assert.ok(existsSync(routed.text.replace(/^📎 report\.txt saved to /, "")), "the bytes really are on disk");
+});
+
+test("a caption rides ABOVE the saved-path reference", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "tg-"));
+  const api = new FakeApi();
+  const ep = new FakeEndpoint();
+  const m = await withAlice(dir, api, ep);
+  await m.handleUpdate(docIn(100, "notes.txt", "look at this"));
+  assert.match(ep.unicasts[0].text, /^look at this\n📎 notes\.txt saved to \//);
+});
+
+test("a received file is announced on #files (manifest + a FileEntry data part)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "tg-"));
+  const api = new FakeApi();
+  const ep = new FakeEndpoint();
+  const m = await withAlice(dir, api, ep);
+  await m.handleUpdate(docIn(100, "spec.txt"));
+  await tick();
+  const announce = ep.multicasts.find((x) => x.channel === "files");
+  assert.ok(announce, "the #files feed still fires from the group leg");
+  assert.equal(announce!.parts?.[0].kind, "text", "the readable line rides as an explicit text part");
+  assert.equal((announce!.parts?.[1] as unknown as { data: { proto: string } }).data.proto, "ai.cotal.file");
+});
+
+test("a download failure is surfaced in the topic and routes nothing", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "tg-"));
+  const api = new FakeApi();
+  const ep = new FakeEndpoint();
+  const m = await withAlice(dir, api, ep);
+  api.getFileThrows = () => { throw new Error("file too big"); };
+  assert.equal(await m.handleUpdate(docIn(100, "huge.bin")), true);
+  assert.deepEqual(ep.unicasts, []);
+  assert.match(api.sends.at(-1)!.text, /file download failed: file too big/);
+});
+
+test("an agent's [[file:…]] uploads into ITS topic, directive stripped", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "tg-"));
+  const api = new FakeApi();
+  const ep = new FakeEndpoint();
+  mirrorIn(dir, api, ep).start();
+  await tick();
+  ep.emit("message", dm("alice", "[[file:/tmp/out.pdf|the report]]"), delivery, live);
+  await tick();
+  assert.deepEqual(api.documents, [{ path: "/tmp/out.pdf", caption: "alice: the report", thread: 100 }]);
+  assert.deepEqual(api.sends, [], "the directive is uploaded, not echoed as text");
 });

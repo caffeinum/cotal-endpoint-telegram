@@ -15,10 +15,25 @@
  * it and never routes its inbound, so there is no double delivery and no contention — this module owns
  * the group end to end, and endpoint-core stays exactly as published.
  */
+import { basename } from "node:path";
 import type { CotalEndpoint, CotalMessage, Presence } from "@cotal-ai/core";
-import { chunkMessage, outboundLabel, textOf, type Formatter } from "@cotal-ai/endpoint-core";
+import {
+  appendFileManifest,
+  chunkMessage,
+  FILE_PART_PROTO,
+  formatFileAnnouncement,
+  outboundLabel,
+  parseFileDirective,
+  resolveFilesChannel,
+  resolveFilesDir,
+  saveInboundFile,
+  textOf,
+  type FileEntry,
+  type Formatter,
+  type Transcriber,
+} from "@cotal-ai/endpoint-core";
 import type { Config } from "./config.js";
-import type { TelegramApi, TgMessage } from "./telegram.js";
+import { fileAttachment, groqFilename, voiceFileId, type TelegramApi, type TgMessage } from "./telegram.js";
 import { isMissingThread, TopicRegistry } from "./topics.js";
 
 /** A mesh peer as it appears in presence/roster. */
@@ -41,6 +56,9 @@ export interface GroupMirrorDeps {
   cfg: Config;
   formatter: Formatter;
   maxLen: number;
+  /** Voice transcription for messages spoken into a topic. Absent → voice is skipped gracefully
+   *  (logged, answered in the topic), exactly as the DM leg behaves with no key. */
+  transcriber?: Transcriber;
   log?: (m: string) => void;
 }
 
@@ -52,6 +70,10 @@ export function attachGroupMirror(deps: GroupMirrorDeps): GroupMirror {
   return new GroupMirror(deps);
 }
 
+/** "This message was handled and produced nothing to route" — distinct from `undefined`, which means
+ *  "not this kind of message, carry on". */
+const SKIP = Symbol("skip");
+
 export class GroupMirror {
   private readonly ep: CotalEndpoint;
   private readonly api: TelegramApi;
@@ -59,17 +81,19 @@ export class GroupMirror {
   private readonly formatter: Formatter;
   private readonly maxLen: number;
   private readonly log: (m: string) => void;
+  private readonly transcriber?: Transcriber;
   private readonly topics: TopicRegistry;
   /** The group this mirror owns — every method is a no-op for any other chat. */
   readonly chatId: number;
 
-  constructor({ ep, api, cfg, formatter, maxLen, log = () => {} }: GroupMirrorDeps) {
+  constructor({ ep, api, cfg, formatter, maxLen, transcriber, log = () => {} }: GroupMirrorDeps) {
     this.ep = ep;
     this.api = api;
     this.cfg = cfg;
     this.formatter = formatter;
     this.maxLen = maxLen;
     this.log = log;
+    this.transcriber = transcriber;
     this.topics = new TopicRegistry(api, cfg, log);
     // Non-null by construction: the composition root only builds a mirror when --topics gave a chat id.
     this.chatId = cfg.topicsChat as number;
@@ -139,6 +163,15 @@ export class GroupMirror {
     const label = outboundLabel(msg, kind);
     const body = textOf(msg);
     const threadId = await this.threadFor(msg.from.name);
+    // An agent sends a file back by embedding `[[file:<abs-path>]]` — strip the directive and upload the
+    // local file into that agent's topic, exactly as the DM leg does for the private chat.
+    const directive = parseFileDirective(body);
+    if (directive) {
+      const caption = (label + (directive.caption ?? directive.rest ?? "")).trimEnd() || undefined;
+      await this.api.sendDocument(this.chatId, directive.path, { caption, message_thread_id: threadId });
+      this.log(`→ topic ${threadId ?? "General"} (${msg.from.name}): file ${basename(directive.path)}`);
+      return;
+    }
     // Same chunking + independent per-chunk formatting the bridge uses, so a markup span split across a
     // boundary degrades to literal text instead of emitting a half-open tag.
     const chunks = chunkMessage(label + body, this.maxLen);
@@ -203,12 +236,22 @@ export class GroupMirror {
       return true;
     }
     const agent = this.topics.agentOf(this.chatId, threadId);
-    const text = (typeof m.text === "string" ? m.text : m.caption ?? "").trim();
     if (!agent) {
       // A topic we didn't create (or whose mapping was lost) has no agent behind it — say so rather than
       // guessing from the topic's title, which the human can rename at any time.
       await this.reply(threadId, "this topic isn't bound to an agent — message it from the bot's DM instead");
       return true;
+    }
+    // VOICE and ATTACHMENTS resolve to TEXT first, then take exactly the same path as a typed line —
+    // spoken words become the message, a file becomes a reference to where it was saved.
+    let text = (typeof m.text === "string" ? m.text : m.caption ?? "").trim();
+    const spoken = await this.transcribe(m, threadId);
+    if (spoken === SKIP) return true;
+    if (spoken !== undefined) text = spoken;
+    else {
+      const saved = await this.saveAttachment(m, threadId, text);
+      if (saved === SKIP) return true;
+      if (saved !== undefined) text = saved;
     }
     if (!text) return true;
     const target = this.resolve(agent);
@@ -221,6 +264,100 @@ export class GroupMirror {
     // The same send signal the DM chat uses: a single recipient reacts 👀. Best-effort.
     await this.api.setMessageReaction(this.chatId, m.message_id, "👀").catch(() => {});
     return true;
+  }
+
+  /**
+   * A voice note spoken into a topic → its transcript, which then routes exactly like a typed line.
+   *   - undefined — not a voice message; the caller carries on
+   *   - SKIP      — it WAS voice but produced nothing routable (no key, empty, or a real failure); the
+   *                 human has been answered in the topic and there is nothing to send
+   * Never throws: a transcription failure must not wedge the poll loop.
+   */
+  private async transcribe(m: TgMessage, threadId: number): Promise<string | undefined | typeof SKIP> {
+    const fileId = voiceFileId(m);
+    if (!fileId) return undefined;
+    if (!this.transcriber) {
+      this.log("voice received in a topic but transcription is disabled (no key configured)");
+      return SKIP;
+    }
+    try {
+      const f = await this.api.getFile(fileId);
+      const bytes = await this.api.downloadFile(f.file_path);
+      const transcript = (await this.transcriber.transcribe(bytes, groqFilename(f.file_path))).trim();
+      if (!transcript) {
+        await this.reply(threadId, "🎙 (heard nothing — empty transcript)");
+        return SKIP;
+      }
+      return transcript;
+    } catch (e) {
+      // Surfaced in the topic and dropped — the poll cursor advances either way, so never a redelivery loop.
+      await this.reply(threadId, `🎙 transcription failed: ${(e as Error).message}`);
+      return SKIP;
+    }
+  }
+
+  /**
+   * A document/photo dropped into a topic → saved to the per-space downloads dir, announced on #files,
+   * and turned into the reference line `📎 <name> saved to <abs-path>` that routes to the agent. The
+   * BINARY never crosses the mesh — a local agent just reads the path.
+   *
+   * Returns undefined when there's no attachment, SKIP when the download/save failed (answered in the
+   * topic). Never throws.
+   */
+  private async saveAttachment(m: TgMessage, threadId: number, caption: string): Promise<string | undefined | typeof SKIP> {
+    const att = fileAttachment(m);
+    if (!att) return undefined;
+    let saved: string;
+    let size: number | undefined;
+    try {
+      const f = await this.api.getFile(att.fileId);
+      const bytes = await this.api.downloadFile(f.file_path);
+      size = bytes.length;
+      saved = saveInboundFile(resolveFilesDir(this.cfg), att.filename, bytes);
+    } catch (e) {
+      await this.reply(threadId, `📎 file download failed: ${(e as Error).message}`);
+      return SKIP;
+    }
+    const name = basename(saved);
+    void this.announceFile({
+      v: 1,
+      ts: Date.now(),
+      name,
+      path: saved,
+      size: size ?? att.size,
+      mime: att.mimeType,
+      caption: caption || undefined,
+      source: this.cfg.name,
+      chatId: this.chatId,
+    });
+    this.log(`saved inbound file → ${saved}`);
+    const reference = `📎 ${name} saved to ${saved}`;
+    return caption ? `${caption}\n${reference}` : reference;
+  }
+
+  /** The same #files feed the DM leg publishes: append to the local manifest + multicast a FileEntry
+   *  data part. BOTH legs are best-effort — the bytes are already safely on disk, so a failure here only
+   *  logs; it must never break the route to the agent. */
+  private async announceFile(entry: FileEntry): Promise<void> {
+    try {
+      appendFileManifest(resolveFilesDir(this.cfg), entry);
+    } catch (e) {
+      this.log(`file manifest append failed (ignored): ${(e as Error).message}`);
+    }
+    try {
+      // core's multicast DISCARDS `text` when `parts` is supplied, so the readable line must ride as an
+      // explicit text part or live #files watchers get an empty message.
+      const line = formatFileAnnouncement(entry);
+      await this.ep.multicast(line, {
+        channel: resolveFilesChannel(this.cfg),
+        parts: [
+          { kind: "text", text: line },
+          { kind: "data", data: { proto: FILE_PART_PROTO, ...entry } },
+        ],
+      });
+    } catch (e) {
+      this.log(`#files announce failed (ignored): ${(e as Error).message}`);
+    }
   }
 
   private resolve(name: string): { id: string } | undefined {

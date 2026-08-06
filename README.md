@@ -177,8 +177,11 @@ get created). Delete a topic in the app and the bridge finds out only when a sen
 `message thread not found` — it drops the stale id, **recreates the topic, and retries**. If the recreate
 fails too (rate limit, admin right revoked), the line goes to **General** rather than being dropped.
 
-Known gaps in the group (all work as always in the DM): slash-commands, voice transcription, and file
-attachments are DM-only for now — the group handles plain text in both directions.
+**Voice and files work in a topic too**, on the same path as the DM: a voice note is transcribed and
+routed to that topic's agent as if you'd typed it; a document or photo is saved to the downloads dir,
+announced on `#files`, and routed as `📎 <name> saved to <path>` so a local agent can just read it; and an
+agent's `[[file:<path>]]` uploads into its own topic. Slash-commands stay DM-only — the DM is the control
+surface, a topic is a conversation.
 
 ## Test
 
