@@ -1,0 +1,27 @@
+src/wake-agent.ts
+  s_ed25aaaf9c7e77::t_5ad51afe2c4d5a 1-93
+  s_ed25aaaf9c7e77::t_f501d728345854 94-98
+test/wake-agent.test.ts
+  s_ed25aaaf9c7e77::t_e28f1a7d05bce6 1-92
+  s_ed25aaaf9c7e77::t_553b5ffd2c0e9a 93-99
+src/config.ts
+  s_ed25aaaf9c7e77::t_2814d0595cdb47 43-47,104-109,143,179
+src/group.ts
+  s_ed25aaaf9c7e77::t_cc4084467bc3d2 39-40,373-374,546-587
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "3cbe5a55866f44ff620224ad50ce6f61c0d2f065",
+  "prompts": {},
+  "sessions": {
+    "s_ed25aaaf9c7e77": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "90dd1251-161e-469a-96db-040d1e555035",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Aleksey Bykhun <theisease@gmail.com>"
+    }
+  }
+}
