@@ -36,6 +36,8 @@ import type { Config } from "./config.js";
 import { fileAttachment, groqFilename, voiceFileId, type TelegramApi, type TgMessage } from "./telegram.js";
 import type { BusyTracker } from "./busy.js";
 import { isMissingThread, TopicRegistry } from "./topics.js";
+import { runAgentWake, wakeArgv } from "./wake-agent.js";
+import { waitForPeer } from "./wake.js";
 
 /** A mesh peer as it appears in presence/roster. */
 interface Card {
@@ -368,11 +370,8 @@ export class GroupMirror {
       await this.api.setMessageReaction(this.chatId, m.message_id, "⚡").catch(() => {});
       return true;
     }
-    const target = this.resolve(agent as string);
-    if (!target) {
-      await this.reply(threadId, `"${agent}" isn't on the mesh right now`);
-      return true;
-    }
+    const target = this.resolve(agent as string) ?? (await this.wakeAgent(agent as string, threadId));
+    if (!target) return true; // wakeAgent has already said what happened, in the topic
     await this.ep.unicast(target.id, text);
     this.log(`→ @${agent} (topic ${threadId}): ${text}`);
     // The same send signal the DM chat uses: a single recipient reacts 👀. Best-effort.
@@ -542,6 +541,48 @@ export class GroupMirror {
     } catch (e) {
       this.log(`couldn't set the ${why} icon on ${key}'s topic (ignored): ${(e as Error).message}`);
     }
+  }
+
+  /**
+   * Start the agent this topic belongs to, then wait for it to reach the mesh, so a message typed at an
+   * offline topic is DELIVERED rather than refused.
+   *
+   * A topic is an address. Refusing was the honest answer while the bridge had no way to start anything,
+   * but it made every sleeping agent unreachable from Telegram — and `/wake` could not help, because it
+   * runs the deployment's single fixed command and wakes that one agent whatever topic you type it in.
+   *
+   * Returns the peer to send to, or undefined having ALREADY replied in the topic: every failure here
+   * (not configured, refused name, command failed, never showed up) is something the human needs told,
+   * and a silent undefined would look like the message simply vanished.
+   *
+   * Starting is deliberately the only thing inferred from the address. The command comes from the
+   * deployment, the name goes in as argv rather than shell text, and a name that isn't a mesh name is
+   * refused outright — see wake-agent.ts.
+   */
+  private async wakeAgent(name: string, threadId: number): Promise<{ id: string } | undefined> {
+    const argv = wakeArgv(this.cfg.agentWakeCommand, name);
+    if (!argv) {
+      await this.reply(threadId, `"${name}" isn't on the mesh right now`);
+      return undefined;
+    }
+    await this.reply(threadId, `"${name}" is asleep — starting it…`);
+    const timeout = this.cfg.wakeTimeoutSec ?? 60;
+    const res = await runAgentWake(argv, timeout, this.log);
+    if (!res.ok) {
+      await this.reply(threadId, `couldn't start "${name}": ${res.detail}`);
+      return undefined;
+    }
+    // The command returning means the process was told to start, NOT that the agent has registered —
+    // sending now would race presence and fail with "no peer". So watch the roster, exactly as the
+    // `/wake` follow-through does.
+    const up = await waitForPeer(this.ep as never, name, timeout * 1000);
+    const peer = up ? this.resolve(name) : undefined;
+    if (!peer) {
+      await this.reply(threadId, `started "${name}" but it hasn't joined the mesh yet — try again in a moment`);
+      return undefined;
+    }
+    this.log(`woke @${name} for topic ${threadId}`);
+    return peer;
   }
 
   private resolve(name: string): { id: string } | undefined {

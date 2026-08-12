@@ -40,6 +40,11 @@ export interface Config extends EndpointConfig {
    *  …` → `global`), since the deployment already says what it wakes; `--wake-agent <name>` overrides.
    *  Absent (no wake command at all) → `/wake` leaves the target alone. */
   wakeAgent?: string;
+  /** Command that starts a TOPIC's agent when it isn't on the mesh — `paw start {agent} --space paw`.
+   *  `{agent}` marks the slot; with no slot the name is appended. Run WITHOUT a shell (wake-agent.ts),
+   *  so the name is argv, never something a shell could reinterpret. Absent ⇒ an offline topic is still
+   *  only reported, never started. */
+  agentWakeCommand?: string;
 }
 
 const DEFAULT_SERVER = "nats://127.0.0.1:4222"; // core's DEFAULT_SERVER (kept literal so config has no core-runtime dep)
@@ -96,6 +101,12 @@ export interface RawArgs {
   wakeCommand?: string;
   /** Seconds `/wake` waits for it (`--wake-timeout`); absent → endpoint-core's default. */
   wakeTimeout?: string;
+  /** Command that starts the agent a TOPIC belongs to when it isn't on the mesh
+   *  (`--agent-wake-command`, else $COTAL_TG_AGENT_WAKE_COMMAND) — e.g. `paw start {agent} --space paw`.
+   *  `{agent}` marks where the name goes; with no slot it is appended. Split into argv and run WITHOUT a
+   *  shell, so the name can never be interpreted as anything but a name (see wake-agent.ts). Absent ⇒
+   *  messaging an offline topic still just says so. */
+  agentWakeCommand?: string;
   /** Set by `--topics <chat-id>`: the forum supergroup to organize into one topic per agent. */
   topics?: string;
   /** Set by `--channels a,b,c`: which channels get their own topic in the organizer group. */
@@ -129,6 +140,7 @@ export function parseArgs(argv: string[]): RawArgs {
     else if (a === "--help-footer") out.helpFooter = val(a, ++i);
     else if (a === "--wake-command") out.wakeCommand = val(a, ++i);
     else if (a === "--wake-timeout") out.wakeTimeout = val(a, ++i);
+    else if (a === "--agent-wake-command") out.agentWakeCommand = val(a, ++i);
     else if (a === "--learn-first-chat") out.learnFirstChat = true;
     else if (a === "--topics") out.topics = val(a, ++i);
     else if (a === "--channels") out.channels = val(a, ++i);
@@ -164,6 +176,7 @@ export function buildConfig(raw: RawArgs): Config {
     filesDir: raw.filesDir,
     helpFooter: raw.helpFooter ?? process.env.COTAL_TG_HELP_FOOTER,
     wakeCommand: raw.wakeCommand ?? process.env.COTAL_TG_WAKE_COMMAND,
+    agentWakeCommand: raw.agentWakeCommand ?? process.env.COTAL_TG_AGENT_WAKE_COMMAND,
     wakeTimeoutSec: raw.wakeTimeout === undefined ? undefined : wakeSecsOrThrow(raw.wakeTimeout),
   };
 }
